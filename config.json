@@ -34,7 +34,7 @@
         "files": ["README.md", "build_ebook.py","daux.patch",".gitignore"],
         "folders": ["ebook"]
     },
-    "languages": {"en": "English", "fr": "Français"},
+    "languages": {"en": "English", "fr": "Français", "ko": "한국어", "ko-rust": "한국어 - Rust"},
     "language": "en",
     "processor": "VulkanLinkProcessor"
 }
