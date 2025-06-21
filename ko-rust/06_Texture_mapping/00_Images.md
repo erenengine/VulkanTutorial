@@ -1,769 +1,477 @@
-## Introduction
+## 서론
 
-The geometry has been colored using per-vertex colors so far, which is a rather
-limited approach. In this part of the tutorial we're going to implement texture
-mapping to make the geometry look more interesting. This will also allow us to
-load and draw basic 3D models in a future chapter.
+지금까지는 정점별(per-vertex) 색상을 사용해 지오메트리를 색칠해왔는데, 이는 다소 제한적인 방법입니다. 이번 장에서는 텍스처 매핑을 구현하여 지오메트리가 더 흥미롭게 보이도록 만들 것입니다. 이를 통해 다음 장에서는 기본적인 3D 모델을 로드하고 그릴 수도 있게 됩니다.
 
-Adding a texture to our application will involve the following steps:
+애플리케이션에 텍스처를 추가하는 작업은 다음 단계를 포함합니다.
 
-* Create an image object backed by device memory
-* Fill it with pixels from an image file
-* Create an image sampler
-* Add a combined image sampler descriptor to sample colors from the texture
+*   디바이스 메모리를 기반으로 하는 이미지 객체 생성
+*   이미지 파일의 픽셀로 채우기
+*   이미지 샘플러 생성
+*   텍스처에서 색상을 샘플링하기 위한 결합 이미지 샘플러 디스크립터 추가
 
-We've already worked with image objects before, but those were automatically
-created by the swap chain extension. This time we'll have to create one by
-ourselves. Creating an image and filling it with data is similar to vertex
-buffer creation. We'll start by creating a staging resource and filling it with
-pixel data and then we copy this to the final image object that we'll use for
-rendering. Although it is possible to create a staging image for this purpose,
-Vulkan also allows you to copy pixels from a `VkBuffer` to an image and the API
-for this is actually [faster on some hardware](https://developer.nvidia.com/vulkan-memory-management).
-We'll first create this buffer and fill it with pixel values, and then we'll
-create an image to copy the pixels to. Creating an image is not very different
-from creating buffers. It involves querying the memory requirements, allocating
-device memory and binding it, just like we've seen before.
+이전에도 이미지 객체를 다룬 적이 있지만, 그것들은 스왑체인 확장에 의해 자동으로 생성되었습니다. 이번에는 직접 하나를 만들어야 합니다. 이미지를 생성하고 데이터를 채우는 과정은 정점 버퍼 생성과 유사합니다. 먼저 스테이징 리소스를 생성하고 픽셀 데이터로 채운 다음, 렌더링에 사용할 최종 이미지 객체로 복사합니다. 이 목적으로 스테이징 이미지를 생성할 수도 있지만, Vulkan은 `VkBuffer`에서 이미지로 픽셀을 복사하는 것도 허용하며, 이 API는 [일부 하드웨어에서 실제로 더 빠릅니다](https://developer.nvidia.com/vulkan-memory-management). 우리는 먼저 이 버퍼를 생성하고 픽셀 값으로 채운 다음, 픽셀을 복사할 이미지를 생성할 것입니다. 이미지 생성은 버퍼 생성과 크게 다르지 않습니다. 이전에 보았듯이 메모리 요구사항을 쿼리하고, 디바이스 메모리를 할당하고, 바인딩하는 과정이 포함됩니다.
 
-However, there is something extra that we'll have to take care of when working
-with images. Images can have different *layouts* that affect how the pixels are
-organized in memory. Due to the way graphics hardware works, simply storing the
-pixels row by row may not lead to the best performance, for example. When
-performing any operation on images, you must make sure that they have the layout
-that is optimal for use in that operation. We've actually already seen some of
-these layouts when we specified the render pass:
+하지만 이미지 작업 시에는 추가적으로 신경 써야 할 것이 있습니다. 이미지는 메모리에서 픽셀이 구성되는 방식에 영향을 미치는 다양한 *레이아웃(layouts)*을 가질 수 있습니다. 그래픽 하드웨어의 작동 방식 때문에, 단순히 픽셀을 행 단위로 저장하는 것이 최상의 성능으로 이어지지 않을 수 있습니다. 이미지에 대한 어떠한 작업을 수행할 때든, 해당 작업에 최적화된 레이아웃을 가지고 있는지 확인해야 합니다. 렌더 패스를 지정할 때 이미 이러한 레이아웃 중 일부를 본 적이 있습니다:
 
-* `VK_IMAGE_LAYOUT_PRESENT_SRC_KHR`: Optimal for presentation
-* `VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL`: Optimal as attachment for writing
-colors from the fragment shader
-* `VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL`: Optimal as source in a transfer
-operation, like `vkCmdCopyImageToBuffer`
-* `VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL`: Optimal as destination in a transfer
-operation, like `vkCmdCopyBufferToImage`
-* `VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL`: Optimal for sampling from a shader
+*   `vk::ImageLayout::PRESENT_SRC_KHR`: 화면 표시에 최적화
+*   `vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL`: 프래그먼트 셰이더에서 색상을 쓰는 어태치먼트로 최적화
+*   `vk::ImageLayout::TRANSFER_SRC_OPTIMAL`: `vkCmdCopyImageToBuffer`와 같은 전송 작업의 소스로 최적화
+*   `vk::ImageLayout::TRANSFER_DST_OPTIMAL`: `vkCmdCopyBufferToImage`와 같은 전송 작업의 대상으로 최적화
+*   `vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL`: 셰이더에서 샘플링하기에 최적화
 
-One of the most common ways to transition the layout of an image is a *pipeline
-barrier*. Pipeline barriers are primarily used for synchronizing access to
-resources, like making sure that an image was written to before it is read, but
-they can also be used to transition layouts. In this chapter we'll see how
-pipeline barriers are used for this purpose. Barriers can additionally be used
-to transfer queue family ownership when using `VK_SHARING_MODE_EXCLUSIVE`.
+이미지의 레이아웃을 전환하는 가장 일반적인 방법 중 하나는 *파이프라인 배리어(pipeline barrier)*입니다. 파이프라인 배리어는 주로 리소스 접근을 동기화하는 데 사용됩니다. 예를 들어, 이미지를 읽기 전에 쓰기가 완료되었는지 확인하는 것과 같지만, 레이아웃을 전환하는 데에도 사용할 수 있습니다. 이번 장에서는 파이프라인 배리어가 이 목적으로 어떻게 사용되는지 볼 것입니다. 배리어는 `vk::SharingMode::EXCLUSIVE`를 사용할 때 큐 패밀리 소유권을 이전하는 데에도 추가적으로 사용될 수 있습니다.
 
-## Image library
+## 이미지 라이브러리
 
-There are many libraries available for loading images, and you can even write
-your own code to load simple formats like BMP and PPM. In this tutorial we'll be
-using the stb_image library from the [stb collection](https://github.com/nothings/stb).
-The advantage of it is that all of the code is in a single file, so it doesn't
-require any tricky build configuration. Download `stb_image.h` and store it in a
-convenient location, like the directory where you saved GLFW and GLM. Add the
-location to your include path.
+이미지를 로드하기 위한 많은 라이브러리가 있으며, Rust에서는 `image` 크레이트가 가장 대중적이고 강력한 선택지입니다. `stb_image`와 마찬가지로 다양한 이미지 형식을 지원하며 사용하기 매우 쉽습니다.
 
-**Visual Studio**
+`Cargo.toml` 파일의 `[dependencies]` 섹션에 `image` 크레이트를 추가하세요.
 
-Add the directory with `stb_image.h` in it to the `Additional Include
-Directories` paths.
-
-![](/images/include_dirs_stb.png)
-
-**Makefile**
-
-Add the directory with `stb_image.h` to the include directories for GCC:
-
-```text
-VULKAN_SDK_PATH = /home/user/VulkanSDK/x.x.x.x/x86_64
-STB_INCLUDE_PATH = /home/user/libraries/stb
-
-...
-
-CFLAGS = -std=c++17 -I$(VULKAN_SDK_PATH)/include -I$(STB_INCLUDE_PATH)
+```toml
+[dependencies]
+ash = "0.37"
+# ... other dependencies
+image = "0.24"
 ```
 
-## Loading an image
+## 이미지 로딩하기
 
-Include the image library like this:
+이제 `image` 크레이트를 사용하여 텍스처를 로드할 수 있습니다. 먼저 애플리케이션 구조체에 관련 필드를 추가해야 합니다.
 
-```c++
-#define STB_IMAGE_IMPLEMENTATION
-#include <stb_image.h>
-```
-
-The header only defines the prototypes of the functions by default. One code
-file needs to include the header with the `STB_IMAGE_IMPLEMENTATION` definition
-to include the function bodies, otherwise we'll get linking errors.
-
-```c++
-void initVulkan() {
-    ...
-    createCommandPool();
-    createTextureImage();
-    createVertexBuffer();
-    ...
-}
-
-...
-
-void createTextureImage() {
-
+```rust
+// In VulkanApp struct
+struct VulkanApp {
+    // ...
+    texture_image: vk::Image,
+    texture_image_memory: vk::DeviceMemory,
+    // ...
 }
 ```
 
-Create a new function `createTextureImage` where we'll load an image and upload
-it into a Vulkan image object. We're going to use command buffers, so it should
-be called after `createCommandPool`.
+그리고 `init_vulkan` 함수에서 `create_texture_image` 함수를 호출하도록 순서를 조정합니다. 커맨드 버퍼를 사용하므로 커맨드 풀 생성 이후에 호출되어야 합니다.
 
-Create a new directory `textures` next to the `shaders` directory to store
-texture images in. We're going to load an image called `texture.jpg` from that
-directory. I've chosen to use the following
-[CC0 licensed image](https://pixabay.com/en/statue-sculpture-fig-historically-1275469/)
-resized to 512 x 512 pixels, but feel free to pick any image you want. The
-library supports most common image file formats, like JPEG, PNG, BMP and GIF.
+```rust
+impl VulkanApp {
+    pub fn init_vulkan(&mut self) -> Result<(), Box<dyn Error>> {
+        // ...
+        self.create_command_pool()?;
+        self.create_texture_image()?;
+        self.create_vertex_buffer()?;
+        // ...
+        Ok(())
+    }
+
+    // ...
+
+    fn create_texture_image(&mut self) -> Result<(), Box<dyn Error>> {
+        // ...
+        Ok(())
+    }
+}
+```
+
+이제 `create_texture_image` 함수에서 이미지를 로드합니다. `shaders` 디렉토리 옆에 `textures` 디렉토리를 만들고, 이 튜토리얼에서 사용할 512x512 픽셀 크기의 `texture.jpg` 이미지를 저장하세요.
 
 ![](/images/texture.jpg)
 
-Loading an image with this library is really easy:
+`image` 크레이트로 이미지를 로드하는 것은 매우 간단합니다.
 
-```c++
-void createTextureImage() {
-    int texWidth, texHeight, texChannels;
-    stbi_uc* pixels = stbi_load("textures/texture.jpg", &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
-    VkDeviceSize imageSize = texWidth * texHeight * 4;
+```rust
+use image::GenericImageView;
+// ... inside create_texture_image
+fn create_texture_image(&mut self) -> Result<(), Box<dyn Error>> {
+    let image_object = image::open("textures/texture.jpg")?;
+    let (tex_width, tex_height) = image_object.dimensions();
+    let image_data = image_object.to_rgba8().into_raw();
+    let image_size = (tex_width * tex_height * 4) as vk::DeviceSize;
 
-    if (!pixels) {
-        throw std::runtime_error("failed to load texture image!");
+    // ... rest of the function
+    Ok(())
+}
+```
+
+`image::open`은 파일 경로에서 이미지를 로드합니다. `.to_rgba8()`는 이미지를 RGBA 형식으로 변환하여 알파 채널이 없는 이미지도 일관성 있게 처리합니다. `.into_raw()`는 이 이미지 데이터를 `Vec<u8>` 형태로 반환합니다. 이 벡터는 `tex_width * tex_height * 4` 바이트 크기를 가집니다.
+
+## 스테이징 버퍼
+
+이제 호스트 가시성(host-visible) 메모리에 버퍼를 생성하여 `vkMapMemory`를 사용하고 픽셀 데이터를 복사할 수 있도록 합니다.
+
+```rust
+// ... inside create_texture_image
+let (staging_buffer, staging_buffer_memory) = self.create_buffer(
+    image_size,
+    vk::BufferUsageFlags::TRANSFER_SRC,
+    vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+)?;
+
+unsafe {
+    let data_ptr = self.device.map_memory(
+        staging_buffer_memory,
+        0,
+        image_size,
+        vk::MemoryMapFlags::empty(),
+    )? as *mut u8;
+
+    data_ptr.copy_from_nonoverlapping(image_data.as_ptr(), image_data.len());
+
+    self.device.unmap_memory(staging_buffer_memory);
+}
+```
+
+`create_buffer` 헬퍼 함수를 사용하여 스테이징 버퍼를 생성합니다. 이 버퍼는 호스트에서 접근 가능해야 하고(`HOST_VISIBLE`), 전송 소스로 사용될 수 있어야 합니다(`TRANSFER_SRC`). `HOST_COHERENT` 플래그는 매핑된 메모리에 쓴 내용이 자동으로 디바이스에 보이도록 보장합니다.
+
+`map_memory`로 메모리 포인터를 얻은 후, `copy_from_nonoverlapping`을 사용하여 이미지 픽셀 데이터를 버퍼로 복사합니다. 작업이 끝나면 `unmap_memory`를 호출합니다. Rust의 `image_data`는 `Vec<u8>`이므로 범위를 벗어나면 자동으로 메모리가 해제됩니다. C++의 `stbi_image_free`처럼 수동으로 해제할 필요가 없습니다.
+
+## 텍스처 이미지
+
+셰이더가 버퍼의 픽셀 값에 접근하도록 설정할 수도 있지만, Vulkan에서는 이미지 객체를 사용하는 것이 더 좋습니다. 이미지 객체는 2D 좌표를 사용할 수 있게 하여 색상을 더 쉽고 빠르게 가져올 수 있게 해줍니다. 이미지 객체 내의 픽셀은 텍셀(texel)이라고 하며, 지금부터 이 용어를 사용하겠습니다.
+
+`createTextureImage` 함수의 나머지 부분에서 텍스처 이미지를 생성합니다.
+
+```rust
+// ... inside create_texture_image
+let (texture_image, texture_image_memory) = self.create_image(
+    tex_width,
+    tex_height,
+    vk::Format::R8G8B8A8_SRGB,
+    vk::ImageTiling::OPTIMAL,
+    vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
+    vk::MemoryPropertyFlags::DEVICE_LOCAL,
+)?;
+
+self.texture_image = texture_image;
+self.texture_image_memory = texture_image_memory;
+```
+
+버퍼 생성 로직을 `create_buffer`로 리팩토링했듯이, 이미지 생성 로직도 `create_image`라는 헬퍼 함수로 추상화하는 것이 좋습니다.
+
+```rust
+impl VulkanApp {
+    fn create_image(
+        &self,
+        width: u32,
+        height: u32,
+        format: vk::Format,
+        tiling: vk::ImageTiling,
+        usage: vk::ImageUsageFlags,
+        properties: vk::MemoryPropertyFlags,
+    ) -> Result<(vk::Image, vk::DeviceMemory), Box<dyn Error>> {
+        let image_info = vk::ImageCreateInfo::builder()
+            .image_type(vk::ImageType::TYPE_2D)
+            .extent(vk::Extent3D { width, height, depth: 1 })
+            .mip_levels(1)
+            .array_layers(1)
+            .format(format)
+            .tiling(tiling)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .usage(usage)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+        let image = unsafe { self.device.create_image(&image_info, None)? };
+
+        let mem_requirements = unsafe { self.device.get_image_memory_requirements(image) };
+
+        let alloc_info = vk::MemoryAllocateInfo::builder()
+            .allocation_size(mem_requirements.size)
+            .memory_type_index(self.find_memory_type(
+                mem_requirements.memory_type_bits,
+                properties,
+            )?);
+
+        let image_memory = unsafe { self.device.allocate_memory(&alloc_info, None)? };
+
+        unsafe { self.device.bind_image_memory(image, image_memory, 0)? };
+
+        Ok((image, image_memory))
     }
 }
 ```
 
-The `stbi_load` function takes the file path and number of channels to load as
-arguments. The `STBI_rgb_alpha` value forces the image to be loaded with an
-alpha channel, even if it doesn't have one, which is nice for consistency with
-other textures in the future. The middle three parameters are outputs for the
-width, height and actual number of channels in the image. The pointer that is
-returned is the first element in an array of pixel values. The pixels are laid
-out row by row with 4 bytes per pixel in the case of `STBI_rgb_alpha` for a
-total of `texWidth * texHeight * 4` values.
+`create_image` 함수는 너비, 높이, 포맷, 타일링, 사용법, 메모리 속성을 인자로 받습니다.
+*   `image_type`: 2D 텍스처이므로 `TYPE_2D`입니다.
+*   `extent`: 이미지의 크기를 지정합니다. 2D 이미지이므로 `depth`는 1입니다.
+*   `format`: `VK_FORMAT_R8G8B8A8_SRGB`는 8비트 RGBA 채널을 사용하며, sRGB 색 공간에 있음을 의미합니다. 픽셀 데이터와 형식이 일치해야 합니다.
+*   `tiling`: `OPTIMAL`은 셰이더에서 효율적으로 접근하기 위한 구현 정의 레이아웃을 사용합니다.
+*   `initial_layout`: `UNDEFINED`로 설정합니다. 첫 전환 시 텍셀 내용이 필요 없기 때문입니다.
+*   `usage`: `TRANSFER_DST`는 이 이미지가 복사 작업의 대상이 될 수 있음을, `SAMPLED`는 셰이더에서 샘플링할 수 있음을 의미합니다.
+*   나머지 필드는 버퍼 생성과 유사합니다.
 
-## Staging buffer
+이미지를 생성한 후, `get_image_memory_requirements`로 메모리 요구사항을 얻고, 적절한 메모리 타입을 찾아 `allocate_memory`로 메모리를 할당한 뒤, `bind_image_memory`로 이미지와 메모리를 바인딩합니다.
 
-We're now going to create a buffer in host visible memory so that we can use
-`vkMapMemory` and copy the pixels to it. Add variables for this temporary buffer
-to the `createTextureImage` function:
+## 레이아웃 전환
 
-```c++
-VkBuffer stagingBuffer;
-VkDeviceMemory stagingBufferMemory;
-```
+이제부터 커맨드 버퍼를 기록하고 실행하는 작업이 반복되므로, 이 로직을 헬퍼 함수로 분리합시다.
 
-The buffer should be in host visible memory so that we can map it and it should
-be usable as a transfer source so that we can copy it to an image later on:
+```rust
+impl VulkanApp {
+    fn begin_single_time_commands(&self) -> Result<vk::CommandBuffer, Box<dyn Error>> {
+        let alloc_info = vk::CommandBufferAllocateInfo::builder()
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_pool(self.command_pool)
+            .command_buffer_count(1);
 
-```c++
-createBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
-```
+        let command_buffer = unsafe { self.device.allocate_command_buffers(&alloc_info)?[0] };
 
-We can then directly copy the pixel values that we got from the image loading
-library to the buffer:
+        let begin_info = vk::CommandBufferBeginInfo::builder()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
-```c++
-void* data;
-vkMapMemory(device, stagingBufferMemory, 0, imageSize, 0, &data);
-    memcpy(data, pixels, static_cast<size_t>(imageSize));
-vkUnmapMemory(device, stagingBufferMemory);
-```
+        unsafe { self.device.begin_command_buffer(command_buffer, &begin_info)? };
 
-Don't forget to clean up the original pixel array now:
-
-```c++
-stbi_image_free(pixels);
-```
-
-## Texture Image
-
-Although we could set up the shader to access the pixel values in the buffer,
-it's better to use image objects in Vulkan for this purpose. Image objects will
-make it easier and faster to retrieve colors by allowing us to use 2D
-coordinates, for one. Pixels within an image object are known as texels and
-we'll use that name from this point on. Add the following new class members:
-
-```c++
-VkImage textureImage;
-VkDeviceMemory textureImageMemory;
-```
-
-The parameters for an image are specified in a `VkImageCreateInfo` struct:
-
-```c++
-VkImageCreateInfo imageInfo{};
-imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-imageInfo.imageType = VK_IMAGE_TYPE_2D;
-imageInfo.extent.width = static_cast<uint32_t>(texWidth);
-imageInfo.extent.height = static_cast<uint32_t>(texHeight);
-imageInfo.extent.depth = 1;
-imageInfo.mipLevels = 1;
-imageInfo.arrayLayers = 1;
-```
-
-The image type, specified in the `imageType` field, tells Vulkan with what kind
-of coordinate system the texels in the image are going to be addressed. It is
-possible to create 1D, 2D and 3D images. One dimensional images can be used to
-store an array of data or gradient, two dimensional images are mainly used for
-textures, and three dimensional images can be used to store voxel volumes, for
-example. The `extent` field specifies the dimensions of the image, basically how
-many texels there are on each axis. That's why `depth` must be `1` instead of
-`0`. Our texture will not be an array and we won't be using mipmapping for now.
-
-```c++
-imageInfo.format = VK_FORMAT_R8G8B8A8_SRGB;
-```
-
-Vulkan supports many possible image formats, but we should use the same format
-for the texels as the pixels in the buffer, otherwise the copy operation will
-fail.
-
-```c++
-imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-```
-
-The `tiling` field can have one of two values:
-
-* `VK_IMAGE_TILING_LINEAR`: Texels are laid out in row-major order like our
-`pixels` array
-* `VK_IMAGE_TILING_OPTIMAL`: Texels are laid out in an implementation defined
-order for optimal access
-
-Unlike the layout of an image, the tiling mode cannot be changed at a later
-time. If you want to be able to directly access texels in the memory of the
-image, then you must use `VK_IMAGE_TILING_LINEAR`. We will be using a staging
-buffer instead of a staging image, so this won't be necessary. We will be using
-`VK_IMAGE_TILING_OPTIMAL` for efficient access from the shader.
-
-```c++
-imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-```
-
-There are only two possible values for the `initialLayout` of an image:
-
-* `VK_IMAGE_LAYOUT_UNDEFINED`: Not usable by the GPU and the very first
-transition will discard the texels.
-* `VK_IMAGE_LAYOUT_PREINITIALIZED`: Not usable by the GPU, but the first
-transition will preserve the texels.
-
-There are few situations where it is necessary for the texels to be preserved
-during the first transition. One example, however, would be if you wanted to use
-an image as a staging image in combination with the `VK_IMAGE_TILING_LINEAR`
-layout. In that case, you'd want to upload the texel data to it and then
-transition the image to be a transfer source without losing the data. In our
-case, however, we're first going to transition the image to be a transfer
-destination and then copy texel data to it from a buffer object, so we don't
-need this property and can safely use `VK_IMAGE_LAYOUT_UNDEFINED`.
-
-```c++
-imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-```
-
-The `usage` field has the same semantics as the one during buffer creation. The
-image is going to be used as destination for the buffer copy, so it should be
-set up as a transfer destination. We also want to be able to access the image
-from the shader to color our mesh, so the usage should include
-`VK_IMAGE_USAGE_SAMPLED_BIT`.
-
-```c++
-imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-```
-
-The image will only be used by one queue family: the one that supports graphics
-(and therefore also) transfer operations.
-
-```c++
-imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-imageInfo.flags = 0; // Optional
-```
-
-The `samples` flag is related to multisampling. This is only relevant for images
-that will be used as attachments, so stick to one sample. There are some
-optional flags for images that are related to sparse images. Sparse images are
-images where only certain regions are actually backed by memory. If you were
-using a 3D texture for a voxel terrain, for example, then you could use this to
-avoid allocating memory to store large volumes of "air" values. We won't be
-using it in this tutorial, so leave it to its default value of `0`.
-
-```c++
-if (vkCreateImage(device, &imageInfo, nullptr, &textureImage) != VK_SUCCESS) {
-    throw std::runtime_error("failed to create image!");
-}
-```
-
-The image is created using `vkCreateImage`, which doesn't have any particularly
-noteworthy parameters. It is possible that the `VK_FORMAT_R8G8B8A8_SRGB` format
-is not supported by the graphics hardware. You should have a list of acceptable
-alternatives and go with the best one that is supported. However, support for
-this particular format is so widespread that we'll skip this step. Using
-different formats would also require annoying conversions. We will get back to
-this in the depth buffer chapter, where we'll implement such a system.
-
-```c++
-VkMemoryRequirements memRequirements;
-vkGetImageMemoryRequirements(device, textureImage, &memRequirements);
-
-VkMemoryAllocateInfo allocInfo{};
-allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-allocInfo.allocationSize = memRequirements.size;
-allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-
-if (vkAllocateMemory(device, &allocInfo, nullptr, &textureImageMemory) != VK_SUCCESS) {
-    throw std::runtime_error("failed to allocate image memory!");
-}
-
-vkBindImageMemory(device, textureImage, textureImageMemory, 0);
-```
-
-Allocating memory for an image works in exactly the same way as allocating
-memory for a buffer. Use `vkGetImageMemoryRequirements` instead of
-`vkGetBufferMemoryRequirements`, and use `vkBindImageMemory` instead of
-`vkBindBufferMemory`.
-
-This function is already getting quite large and there'll be a need to create
-more images in later chapters, so we should abstract image creation into a
-`createImage` function, like we did for buffers. Create the function and move
-the image object creation and memory allocation to it:
-
-```c++
-void createImage(uint32_t width, uint32_t height, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties, VkImage& image, VkDeviceMemory& imageMemory) {
-    VkImageCreateInfo imageInfo{};
-    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    imageInfo.imageType = VK_IMAGE_TYPE_2D;
-    imageInfo.extent.width = width;
-    imageInfo.extent.height = height;
-    imageInfo.extent.depth = 1;
-    imageInfo.mipLevels = 1;
-    imageInfo.arrayLayers = 1;
-    imageInfo.format = format;
-    imageInfo.tiling = tiling;
-    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    imageInfo.usage = usage;
-    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
-    if (vkCreateImage(device, &imageInfo, nullptr, &image) != VK_SUCCESS) {
-        throw std::runtime_error("failed to create image!");
+        Ok(command_buffer)
     }
 
-    VkMemoryRequirements memRequirements;
-    vkGetImageMemoryRequirements(device, image, &memRequirements);
+    fn end_single_time_commands(&self, command_buffer: vk::CommandBuffer) -> Result<(), Box<dyn Error>> {
+        unsafe {
+            self.device.end_command_buffer(command_buffer)?;
 
-    VkMemoryAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.allocationSize = memRequirements.size;
-    allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties);
+            let submit_info = vk::SubmitInfo::builder()
+                .command_buffers(&[command_buffer]);
 
-    if (vkAllocateMemory(device, &allocInfo, nullptr, &imageMemory) != VK_SUCCESS) {
-        throw std::runtime_error("failed to allocate image memory!");
+            self.device.queue_submit(self.graphics_queue, &[submit_info.build()], vk::Fence::null())?;
+            self.device.queue_wait_idle(self.graphics_queue)?;
+
+            self.device.free_command_buffers(self.command_pool, &[command_buffer]);
+        }
+        Ok(())
+    }
+}
+```
+
+이 두 함수는 이전에 `copy_buffer`에서 사용했던 로직과 동일합니다. 일회성 커맨드 버퍼를 할당하고 시작하며, 제출 후 대기하고 해제합니다. 이제 `copy_buffer` 함수를 이 헬퍼들을 사용해 단순화할 수 있습니다.
+
+```rust
+// In VulkanApp impl
+fn copy_buffer(
+    &self,
+    src_buffer: vk::Buffer,
+    dst_buffer: vk::Buffer,
+    size: vk::DeviceSize,
+) -> Result<(), Box<dyn Error>> {
+    let command_buffer = self.begin_single_time_commands()?;
+
+    let copy_region = vk::BufferCopy::builder().size(size);
+    unsafe {
+        self.device.cmd_copy_buffer(command_buffer, src_buffer, dst_buffer, &[copy_region.build()]);
     }
 
-    vkBindImageMemory(device, image, imageMemory, 0);
+    self.end_single_time_commands(command_buffer)?;
+
+    Ok(())
 }
 ```
 
-I've made the width, height, format, tiling mode, usage, and memory properties
-parameters, because these will all vary between the images we'll be creating
-throughout this tutorial.
+이제 이미지 레이아웃 전환을 위한 함수를 만듭니다. 레이아웃 전환에는 *이미지 메모리 배리어*를 사용한 파이프라인 배리어가 주로 사용됩니다.
 
-The `createTextureImage` function can now be simplified to:
+```rust
+// In VulkanApp impl
+fn transition_image_layout(
+    &self,
+    image: vk::Image,
+    format: vk::Format, // format is not used yet, but will be for depth buffer
+    old_layout: vk::ImageLayout,
+    new_layout: vk::ImageLayout,
+) -> Result<(), Box<dyn Error>> {
+    let command_buffer = self.begin_single_time_commands()?;
 
-```c++
-void createTextureImage() {
-    int texWidth, texHeight, texChannels;
-    stbi_uc* pixels = stbi_load("textures/texture.jpg", &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
-    VkDeviceSize imageSize = texWidth * texHeight * 4;
+    let (src_access_mask, dst_access_mask, src_stage, dst_stage) =
+        match (old_layout, new_layout) {
+            (
+                vk::ImageLayout::UNDEFINED,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            ) => (
+                vk::AccessFlags::empty(),
+                vk::AccessFlags::TRANSFER_WRITE,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::TRANSFER,
+            ),
+            (
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            ) => (
+                vk::AccessFlags::TRANSFER_WRITE,
+                vk::AccessFlags::SHADER_READ,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+            ),
+            _ => return Err("Unsupported layout transition!".into()),
+        };
 
-    if (!pixels) {
-        throw std::runtime_error("failed to load texture image!");
+    let barrier = vk::ImageMemoryBarrier::builder()
+        .old_layout(old_layout)
+        .new_layout(new_layout)
+        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .image(image)
+        .subresource_range(vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        })
+        .src_access_mask(src_access_mask)
+        .dst_access_mask(dst_access_mask);
+
+    unsafe {
+        self.device.cmd_pipeline_barrier(
+            command_buffer,
+            src_stage,
+            dst_stage,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[barrier.build()],
+        );
     }
 
-    VkBuffer stagingBuffer;
-    VkDeviceMemory stagingBufferMemory;
-    createBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+    self.end_single_time_commands(command_buffer)?;
 
-    void* data;
-    vkMapMemory(device, stagingBufferMemory, 0, imageSize, 0, &data);
-        memcpy(data, pixels, static_cast<size_t>(imageSize));
-    vkUnmapMemory(device, stagingBufferMemory);
-
-    stbi_image_free(pixels);
-
-    createImage(texWidth, texHeight, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, textureImage, textureImageMemory);
+    Ok(())
 }
 ```
 
-## Layout transitions
+배리어는 리소스 접근을 동기화하는 데 사용됩니다.
+*   `old_layout`, `new_layout`: 전환 전후의 레이아웃을 지정합니다.
+*   `src_queue_family_index`, `dst_queue_family_index`: 큐 패밀리 소유권 이전이 없으면 `IGNORED`로 설정합니다.
+*   `image`, `subresource_range`: 어떤 이미지의 어떤 부분에 배리어를 적용할지 지정합니다.
+*   `src_access_mask`, `dst_access_mask`: 배리어 이전 작업과 배리어 이후 작업을 동기화합니다.
+*   `source_stage`, `destination_stage`: 위 작업들이 발생하는 파이프라인 단계를 지정합니다.
 
-The function we're going to write now involves recording and executing a command
-buffer again, so now's a good time to move that logic into a helper function or
-two:
+우리가 처리할 두 가지 전환은 다음과 같습니다.
+1.  **Undefined → Transfer Destination**: 데이터를 이미지에 쓰기 전입니다. 이전 작업은 없으므로 `src_access_mask`는 비어있고, `src_stage`는 파이프라인의 가장 처음인 `TOP_OF_PIPE`입니다. 쓰기 작업은 전송(transfer) 작업이므로 `dst_access_mask`는 `TRANSFER_WRITE`, `dst_stage`는 `TRANSFER`입니다.
+2.  **Transfer Destination → Shader Read Only**: 이미지 쓰기가 완료된 후, 셰이더에서 읽을 준비를 합니다. 이전 작업은 전송 쓰기(`TRANSFER_WRITE` in `TRANSFER` stage)였고, 이후 작업은 프래그먼트 셰이더에서의 읽기(`SHADER_READ` in `FRAGMENT_SHADER` stage)가 될 것입니다.
 
-```c++
-VkCommandBuffer beginSingleTimeCommands() {
-    VkCommandBufferAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    allocInfo.commandPool = commandPool;
-    allocInfo.commandBufferCount = 1;
+## 버퍼를 이미지로 복사하기
 
-    VkCommandBuffer commandBuffer;
-    vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
+스테이징 버퍼의 데이터를 이미지로 복사하는 헬퍼 함수도 만듭니다.
 
-    VkCommandBufferBeginInfo beginInfo{};
-    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+```rust
+// In VulkanApp impl
+fn copy_buffer_to_image(
+    &self,
+    buffer: vk::Buffer,
+    image: vk::Image,
+    width: u32,
+    height: u32,
+) -> Result<(), Box<dyn Error>> {
+    let command_buffer = self.begin_single_time_commands()?;
 
-    vkBeginCommandBuffer(commandBuffer, &beginInfo);
+    let region = vk::BufferImageCopy::builder()
+        .buffer_offset(0)
+        .buffer_row_length(0)
+        .buffer_image_height(0)
+        .image_subresource(vk::ImageSubresourceLayers {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            mip_level: 0,
+            base_array_layer: 0,
+            layer_count: 1,
+        })
+        .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+        .image_extent(vk::Extent3D { width, height, depth: 1 });
 
-    return commandBuffer;
-}
+    unsafe {
+        self.device.cmd_copy_buffer_to_image(
+            command_buffer,
+            buffer,
+            image,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            &[region.build()],
+        );
+    }
 
-void endSingleTimeCommands(VkCommandBuffer commandBuffer) {
-    vkEndCommandBuffer(commandBuffer);
+    self.end_single_time_commands(command_buffer)?;
 
-    VkSubmitInfo submitInfo{};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &commandBuffer;
-
-    vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
-    vkQueueWaitIdle(graphicsQueue);
-
-    vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
-}
-```
-
-The code for these functions is based on the existing code in `copyBuffer`. You
-can now simplify that function to:
-
-```c++
-void copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
-    VkCommandBuffer commandBuffer = beginSingleTimeCommands();
-
-    VkBufferCopy copyRegion{};
-    copyRegion.size = size;
-    vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, &copyRegion);
-
-    endSingleTimeCommands(commandBuffer);
-}
-```
-
-If we were still using buffers, then we could now write a function to record and
-execute `vkCmdCopyBufferToImage` to finish the job, but this command requires
-the image to be in the right layout first. Create a new function to handle
-layout transitions:
-
-```c++
-void transitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout) {
-    VkCommandBuffer commandBuffer = beginSingleTimeCommands();
-
-    endSingleTimeCommands(commandBuffer);
+    Ok(())
 }
 ```
+`vkCmdCopyBufferToImage`는 버퍼의 어느 영역을 이미지의 어느 영역으로 복사할지 `VkBufferImageCopy` 구조체로 지정받습니다. 여기서 이미지는 복사 대상에 최적화된 레이아웃인 `TRANSFER_DST_OPTIMAL` 상태여야 합니다.
 
-One of the most common ways to perform layout transitions is using an *image
-memory barrier*. A pipeline barrier like that is generally used to synchronize
-access to resources, like ensuring that a write to a buffer completes before
-reading from it, but it can also be used to transition image layouts and
-transfer queue family ownership when `VK_SHARING_MODE_EXCLUSIVE` is used. There
-is an equivalent *buffer memory barrier* to do this for buffers.
+## 텍스처 이미지 준비하기
 
-```c++
-VkImageMemoryBarrier barrier{};
-barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-barrier.oldLayout = oldLayout;
-barrier.newLayout = newLayout;
-```
+이제 모든 헬퍼 함수를 사용하여 `create_texture_image` 함수를 완성할 수 있습니다.
 
-The first two fields specify layout transition. It is possible to use
-`VK_IMAGE_LAYOUT_UNDEFINED` as `oldLayout` if you don't care about the existing
-contents of the image.
+```rust
+// final version of create_texture_image
+fn create_texture_image(&mut self) -> Result<(), Box<dyn Error>> {
+    let image_object = image::open("textures/texture.jpg")?;
+    let (tex_width, tex_height) = image_object.dimensions();
+    let image_data = image_object.to_rgba8().into_raw();
+    let image_size = (tex_width * tex_height * 4) as vk::DeviceSize;
 
-```c++
-barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-```
+    let (staging_buffer, staging_buffer_memory) = self.create_buffer(
+        image_size,
+        vk::BufferUsageFlags::TRANSFER_SRC,
+        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+    )?;
 
-If you are using the barrier to transfer queue family ownership, then these two
-fields should be the indices of the queue families. They must be set to
-`VK_QUEUE_FAMILY_IGNORED` if you don't want to do this (not the default value!).
+    // Copy data to staging buffer
+    unsafe {
+        let data_ptr = self.device.map_memory(staging_buffer_memory, 0, image_size, vk::MemoryMapFlags::empty())? as *mut u8;
+        data_ptr.copy_from_nonoverlapping(image_data.as_ptr(), image_data.len());
+        self.device.unmap_memory(staging_buffer_memory);
+    }
 
-```c++
-barrier.image = image;
-barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-barrier.subresourceRange.baseMipLevel = 0;
-barrier.subresourceRange.levelCount = 1;
-barrier.subresourceRange.baseArrayLayer = 0;
-barrier.subresourceRange.layerCount = 1;
-```
+    let (texture_image, texture_image_memory) = self.create_image(
+        tex_width,
+        tex_height,
+        vk::Format::R8G8B8A8_SRGB,
+        vk::ImageTiling::OPTIMAL,
+        vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
+        vk::MemoryPropertyFlags::DEVICE_LOCAL,
+    )?;
+    self.texture_image = texture_image;
+    self.texture_image_memory = texture_image_memory;
 
-The `image` and `subresourceRange` specify the image that is affected and the
-specific part of the image. Our image is not an array and does not have mipmapping
-levels, so only one level and layer are specified.
+    // Transition layout and copy buffer
+    self.transition_image_layout(
+        self.texture_image,
+        vk::Format::R8G8B8A8_SRGB,
+        vk::ImageLayout::UNDEFINED,
+        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+    )?;
+    self.copy_buffer_to_image(staging_buffer, self.texture_image, tex_width, tex_height)?;
+    self.transition_image_layout(
+        self.texture_image,
+        vk::Format::R8G8B8A8_SRGB,
+        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+    )?;
 
-```c++
-barrier.srcAccessMask = 0; // TODO
-barrier.dstAccessMask = 0; // TODO
-```
+    // Cleanup staging buffer
+    unsafe {
+        self.device.destroy_buffer(staging_buffer, None);
+        self.device.free_memory(staging_buffer_memory, None);
+    }
 
-Barriers are primarily used for synchronization purposes, so you must specify
-which types of operations that involve the resource must happen before the
-barrier, and which operations that involve the resource must wait on the
-barrier. We need to do that despite already using `vkQueueWaitIdle` to manually
-synchronize. The right values depend on the old and new layout, so we'll get
-back to this once we've figured out which transitions we're going to use.
-
-```c++
-vkCmdPipelineBarrier(
-    commandBuffer,
-    0 /* TODO */, 0 /* TODO */,
-    0,
-    0, nullptr,
-    0, nullptr,
-    1, &barrier
-);
-```
-
-All types of pipeline barriers are submitted using the same function. The first
-parameter after the command buffer specifies in which pipeline stage the
-operations occur that should happen before the barrier. The second parameter
-specifies the pipeline stage in which operations will wait on the barrier. The
-pipeline stages that you are allowed to specify before and after the barrier
-depend on how you use the resource before and after the barrier. The allowed
-values are listed in [this table](https://www.khronos.org/registry/vulkan/specs/1.3-extensions/html/chap7.html#synchronization-access-types-supported)
-of the specification. For example, if you're going to read from a uniform after
-the barrier, you would specify a usage of `VK_ACCESS_UNIFORM_READ_BIT` and the
-earliest shader that will read from the uniform as pipeline stage, for example
-`VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT`. It would not make sense to specify
-a non-shader pipeline stage for this type of usage and the validation layers
-will warn you when you specify a pipeline stage that does not match the type of
-usage.
-
-The third parameter is either `0` or `VK_DEPENDENCY_BY_REGION_BIT`. The latter
-turns the barrier into a per-region condition. That means that the
-implementation is allowed to already begin reading from the parts of a resource
-that were written so far, for example.
-
-The last three pairs of parameters reference arrays of pipeline barriers of the
-three available types: memory barriers, buffer memory barriers, and image memory
-barriers like the one we're using here. Note that we're not using the `VkFormat`
-parameter yet, but we'll be using that one for special transitions in the depth
-buffer chapter.
-
-## Copying buffer to image
-
-Before we get back to `createTextureImage`, we're going to write one more helper
-function: `copyBufferToImage`:
-
-```c++
-void copyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height) {
-    VkCommandBuffer commandBuffer = beginSingleTimeCommands();
-
-    endSingleTimeCommands(commandBuffer);
+    Ok(())
 }
 ```
 
-Just like with buffer copies, you need to specify which part of the buffer is
-going to be copied to which part of the image. This happens through
-`VkBufferImageCopy` structs:
+전체 프로세스는 다음과 같습니다:
+1. 이미지를 파일에서 로드합니다.
+2. 픽셀 데이터를 담을 스테이징 버퍼를 생성하고 데이터를 복사합니다.
+3. 최종 텍스처 이미지(`DEVICE_LOCAL`)를 생성합니다.
+4. 이미지 레이아웃을 `UNDEFINED`에서 `TRANSFER_DST_OPTIMAL`로 전환합니다.
+5. 스테이징 버퍼에서 텍스처 이미지로 데이터를 복사합니다.
+6. 셰이더에서 읽을 수 있도록 레이아웃을 `TRANSFER_DST_OPTIMAL`에서 `SHADER_READ_ONLY_OPTIMAL`로 전환합니다.
+7. 스테이징 버퍼와 그 메모리를 해제합니다.
 
-```c++
-VkBufferImageCopy region{};
-region.bufferOffset = 0;
-region.bufferRowLength = 0;
-region.bufferImageHeight = 0;
+## 정리
 
-region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-region.imageSubresource.mipLevel = 0;
-region.imageSubresource.baseArrayLayer = 0;
-region.imageSubresource.layerCount = 1;
+애플리케이션이 종료될 때 텍스처 이미지와 메모리도 해제해야 합니다. `cleanup` 함수를 수정하세요.
 
-region.imageOffset = {0, 0, 0};
-region.imageExtent = {
-    width,
-    height,
-    1
-};
-```
-
-Most of these fields are self-explanatory. The `bufferOffset` specifies the byte
-offset in the buffer at which the pixel values start. The `bufferRowLength` and
-`bufferImageHeight` fields specify how the pixels are laid out in memory. For
-example, you could have some padding bytes between rows of the image. Specifying
-`0` for both indicates that the pixels are simply tightly packed like they are
-in our case. The `imageSubresource`, `imageOffset` and `imageExtent` fields
-indicate to which part of the image we want to copy the pixels.
-
-Buffer to image copy operations are enqueued using the `vkCmdCopyBufferToImage`
-function:
-
-```c++
-vkCmdCopyBufferToImage(
-    commandBuffer,
-    buffer,
-    image,
-    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-    1,
-    &region
-);
-```
-
-The fourth parameter indicates which layout the image is currently using. I'm
-assuming here that the image has already been transitioned to the layout that is
-optimal for copying pixels to. Right now we're only copying one chunk of pixels
-to the whole image, but it's possible to specify an array of `VkBufferImageCopy`
-to perform many different copies from this buffer to the image in one operation.
-
-## Preparing the texture image
-
-We now have all of the tools we need to finish setting up the texture image, so
-we're going back to the `createTextureImage` function. The last thing we did
-there was creating the texture image. The next step is to copy the staging
-buffer to the texture image. This involves two steps:
-
-* Transition the texture image to `VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL`
-* Execute the buffer to image copy operation
-
-This is easy to do with the functions we just created:
-
-```c++
-transitionImageLayout(textureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-copyBufferToImage(stagingBuffer, textureImage, static_cast<uint32_t>(texWidth), static_cast<uint32_t>(texHeight));
-```
-
-The image was created with the `VK_IMAGE_LAYOUT_UNDEFINED` layout, so that one
-should be specified as old layout when transitioning `textureImage`. Remember
-that we can do this because we don't care about its contents before performing
-the copy operation.
-
-To be able to start sampling from the texture image in the shader, we need one
-last transition to prepare it for shader access:
-
-```c++
-transitionImageLayout(textureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-```
-
-## Transition barrier masks
-
-If you run your application with validation layers enabled now, then you'll see that
-it complains about the access masks and pipeline stages in
-`transitionImageLayout` being invalid. We still need to set those based on the
-layouts in the transition.
-
-There are two transitions we need to handle:
-
-* Undefined → transfer destination: transfer writes that don't need to wait on
-anything
-* Transfer destination → shader reading: shader reads should wait on transfer
-writes, specifically the shader reads in the fragment shader, because that's
-where we're going to use the texture
-
-These rules are specified using the following access masks and pipeline stages:
-
-```c++
-VkPipelineStageFlags sourceStage;
-VkPipelineStageFlags destinationStage;
-
-if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
-    barrier.srcAccessMask = 0;
-    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-
-    sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-    destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-} else if (oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
-    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
-    sourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-    destinationStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-} else {
-    throw std::invalid_argument("unsupported layout transition!");
-}
-
-vkCmdPipelineBarrier(
-    commandBuffer,
-    sourceStage, destinationStage,
-    0,
-    0, nullptr,
-    0, nullptr,
-    1, &barrier
-);
-```
-
-As you can see in the aforementioned table, transfer writes must occur in the
-pipeline transfer stage. Since the writes don't have to wait on anything, you
-may specify an empty access mask and the earliest possible pipeline stage
-`VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT` for the pre-barrier operations. It should be
-noted that `VK_PIPELINE_STAGE_TRANSFER_BIT` is not a *real* stage within the
-graphics and compute pipelines. It is more of a pseudo-stage where transfers
-happen. See [the documentation](https://www.khronos.org/registry/vulkan/specs/1.3-extensions/html/chap7.html#VkPipelineStageFlagBits)
-for more information and other examples of pseudo-stages.
-
-The image will be written in the same pipeline stage and subsequently read by
-the fragment shader, which is why we specify shader reading access in the
-fragment shader pipeline stage.
-
-If we need to do more transitions in the future, then we'll extend the function.
-The application should now run successfully, although there are of course no
-visual changes yet.
-
-One thing to note is that command buffer submission results in implicit
-`VK_ACCESS_HOST_WRITE_BIT` synchronization at the beginning. Since the
-`transitionImageLayout` function executes a command buffer with only a single
-command, you could use this implicit synchronization and set `srcAccessMask` to
-`0` if you ever needed a `VK_ACCESS_HOST_WRITE_BIT` dependency in a layout
-transition. It's up to you if you want to be explicit about it or not, but I'm
-personally not a fan of relying on these OpenGL-like "hidden" operations.
-
-There is actually a special type of image layout that supports all operations,
-`VK_IMAGE_LAYOUT_GENERAL`. The problem with it, of course, is that it doesn't
-necessarily offer the best performance for any operation. It is required for
-some special cases, like using an image as both input and output, or for reading
-an image after it has left the preinitialized layout.
-
-All of the helper functions that submit commands so far have been set up to
-execute synchronously by waiting for the queue to become idle. For practical
-applications it is recommended to combine these operations in a single command
-buffer and execute them asynchronously for higher throughput, especially the
-transitions and copy in the `createTextureImage` function. Try to experiment
-with this by creating a `setupCommandBuffer` that the helper functions record
-commands into, and add a `flushSetupCommands` to execute the commands that have
-been recorded so far. It's best to do this after the texture mapping works to
-check if the texture resources are still set up correctly.
-
-## Cleanup
-
-Finish the `createTextureImage` function by cleaning up the staging buffer and
-its memory at the end:
-
-```c++
-    transitionImageLayout(textureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-
-    vkDestroyBuffer(device, stagingBuffer, nullptr);
-    vkFreeMemory(device, stagingBufferMemory, nullptr);
+```rust
+impl VulkanApp {
+    fn cleanup(&mut self) {
+        unsafe {
+            // ...
+            self.device.destroy_image(self.texture_image, None);
+            self.device.free_memory(self.texture_image_memory, None);
+            // ...
+        }
+    }
 }
 ```
 
-The main texture image is used until the end of the program:
-
-```c++
-void cleanup() {
-    cleanupSwapChain();
-
-    vkDestroyImage(device, textureImage, nullptr);
-    vkFreeMemory(device, textureImageMemory, nullptr);
-
-    ...
-}
-```
-
-The image now contains the texture, but we still need a way to access it from
-the graphics pipeline. We'll work on that in the next chapter.
-
-[C++ code](/code/24_texture_image.cpp) /
-[Vertex shader](/code/22_shader_ubo.vert) /
-[Fragment shader](/code/22_shader_ubo.frag)
+이제 이미지가 텍스처를 포함하게 되었지만, 아직 그래픽 파이프라인에서 접근할 방법이 없습니다. 다음 장에서 이 부분을 다루겠습니다.
