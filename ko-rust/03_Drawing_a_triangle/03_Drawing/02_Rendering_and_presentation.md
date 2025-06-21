@@ -1,577 +1,334 @@
+이번 장에서는 모든 것을 하나로 합칠 시간입니다. 메인 루프에서 호출되어 삼각형을 화면에 그리는 `draw_frame` 함수를 작성할 것입니다. 먼저 함수를 만들고 `main_loop`에서 호출해 봅시다.
 
-This is the chapter where everything is going to come together. We're going to
-write the `drawFrame` function that will be called from the main loop to put the
-triangle on the screen. Let's start by creating the function and call it from
-`mainLoop`:
+```rust
+fn main_loop(&mut self) {
+    self.event_loop
+        .run(move |event, _, control_flow| {
+            // ... 이벤트 처리 ...
+            match event {
+                // ...
+                Event::MainEventsCleared => {
+                    self.window.request_redraw();
+                }
+                Event::RedrawRequested(_) => {
+                    self.draw_frame();
+                }
+                // ...
+            }
+        })
+}
 
-```c++
-void mainLoop() {
-    while (!glfwWindowShouldClose(window)) {
-        glfwPollEvents();
-        drawFrame();
+// ...
+
+impl HelloTriangleApplication {
+    fn draw_frame(&mut self) {
+        // 여기에 렌더링 로직을 작성합니다.
+    }
+}
+```
+*참고: Rust에서는 이벤트 루프 기반으로 동작하므로, C++의 `while` 루프 대신 `winit`의 `RedrawRequested` 이벤트 핸들러 내에서 `draw_frame`을 호출하는 것이 일반적입니다.*
+
+## 프레임의 개요
+
+높은 수준에서 Vulkan으로 프레임을 렌더링하는 것은 다음과 같은 공통된 단계로 구성됩니다.
+
+*   이전 프레임이 끝나기를 기다립니다.
+*   스왑 체인에서 이미지를 가져옵니다.
+*   가져온 이미지에 장면을 그리는 커맨드 버퍼를 기록합니다.
+*   기록된 커맨드 버퍼를 제출합니다.
+*   스왑 체인 이미지를 제시(present)합니다.
+
+이후 장에서 드로잉 함수를 더 확장하겠지만, 지금으로서는 이것이 우리 렌더링 루프의 핵심입니다.
+
+<!-- 프레임 개요를 보여주는 이미지 추가 -->
+
+## 동기화
+
+<!-- 동기화를 보여주는 이미지 추가 -->
+
+Vulkan의 핵심 설계 철학 중 하나는 GPU에서의 실행 동기화가 명시적이라는 것입니다. (이하 동기화에 대한 개념 설명은 C++ 버전과 동일하므로 생략하고, Rust/Ash 구현에 초점을 맞춥니다.)
+
+... (세마포어와 펜스에 대한 개념 설명) ...
+
+### 무엇을 선택해야 할까?
+
+우리에게는 두 가지 동기화 프리미티브가 있고, 마침 동기화를 적용할 두 곳이 있습니다. 스왑 체인 작업과 이전 프레임이 끝나기를 기다리는 것입니다. 스왑 체인 작업은 GPU에서 발생하므로 세마포어를 사용하고, 이전 프레임이 끝나기를 기다리는 작업은 CPU(호스트)가 기다려야 하므로 펜스를 사용합니다. 이는 GPU가 커맨드 버퍼를 사용하는 동안 CPU가 해당 커맨드 버퍼를 덮어쓰지 않도록 보장하기 위함입니다.
+
+## 동기화 객체 생성하기
+
+단일 프레임만 처리하는 대신, 여러 프레임이 동시에 처리 중(in-flight)일 수 있는 보다 일반적인 접근 방식을 사용하겠습니다. 이를 통해 GPU가 하나의 프레임을 렌더링하는 동안 CPU는 다음 프레임을 준비할 수 있어 성능이 향상됩니다. `MAX_FRAMES_IN_FLIGHT` 상수를 정의하고, 각 프레임에 대한 동기화 객체 세트를 생성합니다.
+
+```rust
+const MAX_FRAMES_IN_FLIGHT: usize = 2;
+
+// AppData 구조체에 추가
+struct AppData {
+    // ...
+    image_available_semaphores: Vec<vk::Semaphore>,
+    render_finished_semaphores: Vec<vk::Semaphore>,
+    in_flight_fences: Vec<vk::Fence>,
+    // ...
+}
+
+// HelloTriangleApplication 구조체에 추가
+struct HelloTriangleApplication {
+    // ...
+    current_frame: usize,
+    // ...
+}
+```
+
+이제 동기화 객체를 생성하는 `create_sync_objects` 함수를 만들어 봅시다.
+
+```rust
+// main.rs
+impl HelloTriangleApplication {
+    pub fn new(event_loop: &EventLoop<()>) -> Self {
+        // ...
+        let command_buffers =
+            create_command_buffers(&device, &command_pool, &graphics_pipeline, &framebuffers, &render_pass, &app_data);
+
+        let (
+            image_available_semaphores,
+            render_finished_semaphores,
+            in_flight_fences,
+        ) = create_sync_objects(&device);
+
+        let mut app_data = AppData {
+            // ...
+            image_available_semaphores,
+            render_finished_semaphores,
+            in_flight_fences,
+        };
+
+        Self {
+            // ...
+            app_data,
+            current_frame: 0,
+        }
     }
 }
 
-...
-
-void drawFrame() {
-
-}
-```
-
-## Outline of a frame
-
-At a high level, rendering a frame in Vulkan consists of a common set of steps:
-
-* Wait for the previous frame to finish
-* Acquire an image from the swap chain
-* Record a command buffer which draws the scene onto that image
-* Submit the recorded command buffer
-* Present the swap chain image
-
-While we will expand the drawing function in later chapters, for now this is the
-core of our render loop.
-
-<!-- Add an image that shows an outline of the frame -->
-
-## Synchronization
-
-<!-- Maybe add images for showing synchronization -->
-
-A core design philosophy in Vulkan is that synchronization of execution on
-the GPU is explicit. The order of operations is up to us to define using various
-synchronization primitives which tell the driver the order we want things to run
-in. This means that many Vulkan API calls which start executing work on the GPU
-are asynchronous, the functions will return before the operation has finished.
-
-In this chapter there are a number of events that we need to order explicitly
-because they happen on the GPU, such as:
-
-* Acquire an image from the swap chain
-* Execute commands that draw onto the acquired image
-* Present that image to the screen for presentation, returning it to the swapchain
-
-Each of these events is set in motion using a single function call, but are all
-executed asynchronously. The function calls will return before the operations
-are actually finished and the order of execution is also undefined. That is
-unfortunate, because each of the operations depends on the previous one
-finishing. Thus we need to explore which primitives we can use to achieve
-the desired ordering.
-
-### Semaphores
-
-A semaphore is used to add order between queue operations. Queue operations
-refer to the work we submit to a queue, either in a command buffer or from
-within a function as we will see later. Examples of queues are the graphics
-queue and the presentation queue. Semaphores are used both to order work inside
-the same queue and between different queues.
-
-There happens to be two kinds of semaphores in Vulkan, binary and timeline.
-Because only binary semaphores will be used in this tutorial, we will not
-discuss timeline semaphores. Further mention of the term semaphore exclusively
-refers to binary semaphores.
-
-A semaphore is either unsignaled or signaled. It begins life as unsignaled. The
-way we use a semaphore to order queue operations is by providing the same
-semaphore as a 'signal' semaphore in one queue operation and as a 'wait'
-semaphore in another queue operation. For example, lets say we have semaphore S
-and queue operations A and B that we want to execute in order. What we tell
-Vulkan is that operation A will 'signal' semaphore S when it finishes executing,
-and operation B will 'wait' on semaphore S before it begins executing. When
-operation A finishes, semaphore S will be signaled, while operation B wont
-start until S is signaled. After operation B begins executing, semaphore S
-is automatically reset back to being unsignaled, allowing it to be used again.
-
-Pseudo-code of what was just described:
-```
-VkCommandBuffer A, B = ... // record command buffers
-VkSemaphore S = ... // create a semaphore
-
-// enqueue A, signal S when done - starts executing immediately
-vkQueueSubmit(work: A, signal: S, wait: None)
-
-// enqueue B, wait on S to start
-vkQueueSubmit(work: B, signal: None, wait: S)
-```
-
-Note that in this code snippet, both calls to `vkQueueSubmit()` return
-immediately - the waiting only happens on the GPU. The CPU continues running
-without blocking. To make the CPU wait, we need a different synchronization
-primitive, which we will now describe.
-
-### Fences
-
-A fence has a similar purpose, in that it is used to synchronize execution, but
-it is for ordering the execution on the CPU, otherwise known as the host.
-Simply put, if the host needs to know when the GPU has finished something, we
-use a fence.
-
-Similar to semaphores, fences are either in a signaled or unsignaled state.
-Whenever we submit work to execute, we can attach a fence to that work. When
-the work is finished, the fence will be signaled. Then we can make the host
-wait for the fence to be signaled, guaranteeing that the work has finished
-before the host continues.
-
-A concrete example is taking a screenshot. Say we have already done the
-necessary work on the GPU. Now need to transfer the image from the GPU over
-to the host and then save the memory to a file. We have command buffer A which
-executes the transfer and fence F. We submit command buffer A with fence F,
-then immediately tell the host to wait for F to signal. This causes the host to
-block until command buffer A finishes execution. Thus we are safe to let the
-host save the file to disk, as the memory transfer has completed.
-
-Pseudo-code for what was described:
-```
-VkCommandBuffer A = ... // record command buffer with the transfer
-VkFence F = ... // create the fence
-
-// enqueue A, start work immediately, signal F when done
-vkQueueSubmit(work: A, fence: F)
-
-vkWaitForFence(F) // blocks execution until A has finished executing
-
-save_screenshot_to_disk() // can't run until the transfer has finished
-```
-
-Unlike the semaphore example, this example *does* block host execution. This
-means the host won't do anything except wait until execution has finished. For
-this case, we had to make sure the transfer was complete before we could save
-the screenshot to disk.
-
-In general, it is preferable to not block the host unless necessary. We want to
-feed the GPU and the host with useful work to do. Waiting on fences to signal
-is not useful work. Thus we prefer semaphores, or other synchronization
-primitives not yet covered, to synchronize our work.
-
-Fences must be reset manually to put them back into the unsignaled state. This
-is because fences are used to control the execution of the host, and so the
-host gets to decide when to reset the fence. Contrast this to semaphores which
-are used to order work on the GPU without the host being involved.
-
-In summary, semaphores are used to specify the execution order of operations on
-the GPU while fences are used to keep the CPU and GPU in sync with each-other.
-
-### What to choose?
-
-We have two synchronization primitives to use and conveniently two places to
-apply synchronization: Swapchain operations and waiting for the previous frame
-to finish. We want to use semaphores for swapchain operations because they
-happen on the GPU, thus we don't want to make the host wait around if we can
-help it. For waiting on the previous frame to finish, we want to use fences
-for the opposite reason, because we need the host to wait. This is so we don't
-draw more than one frame at a time. Because we re-record the command buffer
-every frame, we cannot record the next frame's work to the command buffer
-until the current frame has finished executing, as we don't want to overwrite
-the current contents of the command buffer while the GPU is using it.
-
-## Creating the synchronization objects
-
-We'll need one semaphore to signal that an image has been acquired from the
-swapchain and is ready for rendering, another one to signal that rendering has
-finished and presentation can happen, and a fence to make sure only one frame
-is rendering at a time.
-
-Create three class members to store these semaphore objects and fence object:
-
-```c++
-VkSemaphore imageAvailableSemaphore;
-VkSemaphore renderFinishedSemaphore;
-VkFence inFlightFence;
-```
-
-To create the semaphores, we'll add the last `create` function for this part of
-the tutorial: `createSyncObjects`:
-
-```c++
-void initVulkan() {
-    createInstance();
-    setupDebugMessenger();
-    createSurface();
-    pickPhysicalDevice();
-    createLogicalDevice();
-    createSwapChain();
-    createImageViews();
-    createRenderPass();
-    createGraphicsPipeline();
-    createFramebuffers();
-    createCommandPool();
-    createCommandBuffer();
-    createSyncObjects();
-}
-
-...
-
-void createSyncObjects() {
-
-}
-```
-
-Creating semaphores requires filling in the `VkSemaphoreCreateInfo`, but in the
-current version of the API it doesn't actually have any required fields besides
-`sType`:
-
-```c++
-void createSyncObjects() {
-    VkSemaphoreCreateInfo semaphoreInfo{};
-    semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-}
-```
-
-Future versions of the Vulkan API or extensions may add functionality for the
-`flags` and `pNext` parameters like it does for the other structures.
-
-Creating a fence requires filling in the `VkFenceCreateInfo`:
-
-```c++
-VkFenceCreateInfo fenceInfo{};
-fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-```
-
-Creating the semaphores and fence follows the familiar pattern with
-`vkCreateSemaphore` & `vkCreateFence`:
-
-```c++
-if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphore) != VK_SUCCESS ||
-    vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphore) != VK_SUCCESS ||
-    vkCreateFence(device, &fenceInfo, nullptr, &inFlightFence) != VK_SUCCESS) {
-    throw std::runtime_error("failed to create semaphores!");
-}
-```
-
-The semaphores and fence should be cleaned up at the end of the program, when
-all commands have finished and no more synchronization is necessary:
-
-```c++
-void cleanup() {
-    vkDestroySemaphore(device, imageAvailableSemaphore, nullptr);
-    vkDestroySemaphore(device, renderFinishedSemaphore, nullptr);
-    vkDestroyFence(device, inFlightFence, nullptr);
-```
-
-Onto the main drawing function!
-
-## Waiting for the previous frame
-
-At the start of the frame, we want to wait until the previous frame has
-finished, so that the command buffer and semaphores are available to use. To do
-that, we call `vkWaitForFences`:
-
-```c++
-void drawFrame() {
-    vkWaitForFences(device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
-}
-```
-
-The `vkWaitForFences` function takes an array of fences and waits on the host
-for either any or all of the fences to be signaled before returning. The
-`VK_TRUE` we pass here indicates that we want to wait for all fences, but in
-the case of a single one it doesn't matter. This function also has a timeout
-parameter that we set to the maximum value of a 64 bit unsigned integer,
-`UINT64_MAX`, which effectively disables the timeout.
-
-After waiting, we need to manually reset the fence to the unsignaled state with
-the `vkResetFences` call:
-```c++
-    vkResetFences(device, 1, &inFlightFence);
-```
-
-Before we can proceed, there is a slight hiccup in our design. On the first
-frame we call `drawFrame()`, which immediately waits on `inFlightFence` to
-be signaled. `inFlightFence` is only signaled after a frame has finished
-rendering, yet since this is the first frame, there are no previous frames in
-which to signal the fence! Thus `vkWaitForFences()` blocks indefinitely,
-waiting on something which will never happen.
-
-Of the many solutions to this dilemma, there is a clever workaround built into
-the API. Create the fence in the signaled state, so that the first call to
-`vkWaitForFences()` returns immediately since the fence is already signaled.
-
-To do this, we add the `VK_FENCE_CREATE_SIGNALED_BIT` flag to the `VkFenceCreateInfo`:
-
-```c++
-void createSyncObjects() {
-    ...
-
-    VkFenceCreateInfo fenceInfo{};
-    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-
-    ...
-}
-```
-
-## Acquiring an image from the swap chain
-
-The next thing we need to do in the `drawFrame` function is acquire an image
-from the swap chain. Recall that the swap chain is an extension feature, so we
-must use a function with the `vk*KHR` naming convention:
-
-```c++
-void drawFrame() {
-    ...
-
-    uint32_t imageIndex;
-    vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
-}
-```
-
-The first two parameters of `vkAcquireNextImageKHR` are the logical device and
-the swap chain from which we wish to acquire an image. The third parameter
-specifies a timeout in nanoseconds for an image to become available. Using the
-maximum value of a 64 bit unsigned integer means we effectively disable the
-timeout.
-
-The next two parameters specify synchronization objects that are to be signaled
-when the presentation engine is finished using the image. That's the point in
-time where we can start drawing to it. It is possible to specify a semaphore,
-fence or both. We're going to use our `imageAvailableSemaphore` for that purpose
-here.
-
-The last parameter specifies a variable to output the index of the swap chain
-image that has become available. The index refers to the `VkImage` in our
-`swapChainImages` array. We're going to use that index to pick the `VkFrameBuffer`.
-
-## Recording the command buffer
-
-With the imageIndex specifying the swap chain image to use in hand, we can now
-record the command buffer. First, we call `vkResetCommandBuffer` on the command
-buffer to make sure it is able to be recorded.
-
-```c++
-vkResetCommandBuffer(commandBuffer, 0);
-```
-
-The second parameter of `vkResetCommandBuffer` is a `VkCommandBufferResetFlagBits`
-flag. Since we don't want to do anything special, we leave it as 0.
-
-Now call the function `recordCommandBuffer` to record the commands we want.
-
-```c++
-recordCommandBuffer(commandBuffer, imageIndex);
-```
-
-With a fully recorded command buffer, we can now submit it.
-
-## Submitting the command buffer
-
-Queue submission and synchronization is configured through parameters in the
-`VkSubmitInfo` structure.
-
-```c++
-VkSubmitInfo submitInfo{};
-submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-
-VkSemaphore waitSemaphores[] = {imageAvailableSemaphore};
-VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
-submitInfo.waitSemaphoreCount = 1;
-submitInfo.pWaitSemaphores = waitSemaphores;
-submitInfo.pWaitDstStageMask = waitStages;
-```
-
-The first three parameters specify which semaphores to wait on before execution
-begins and in which stage(s) of the pipeline to wait. We want to wait with
-writing colors to the image until it's available, so we're specifying the stage
-of the graphics pipeline that writes to the color attachment. That means that
-theoretically the implementation can already start executing our vertex shader
-and such while the image is not yet available. Each entry in the `waitStages`
-array corresponds to the semaphore with the same index in `pWaitSemaphores`.
-
-```c++
-submitInfo.commandBufferCount = 1;
-submitInfo.pCommandBuffers = &commandBuffer;
-```
-
-The next two parameters specify which command buffers to actually submit for
-execution. We simply submit the single command buffer we have.
-
-```c++
-VkSemaphore signalSemaphores[] = {renderFinishedSemaphore};
-submitInfo.signalSemaphoreCount = 1;
-submitInfo.pSignalSemaphores = signalSemaphores;
-```
-
-The `signalSemaphoreCount` and `pSignalSemaphores` parameters specify which
-semaphores to signal once the command buffer(s) have finished execution. In our
-case we're using the `renderFinishedSemaphore` for that purpose.
-
-```c++
-if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFence) != VK_SUCCESS) {
-    throw std::runtime_error("failed to submit draw command buffer!");
-}
-```
-
-We can now submit the command buffer to the graphics queue using
-`vkQueueSubmit`. The function takes an array of `VkSubmitInfo` structures as
-argument for efficiency when the workload is much larger. The last parameter
-references an optional fence that will be signaled when the command buffers
-finish execution. This allows us to know when it is safe for the command
-buffer to be reused, thus we want to give it `inFlightFence`. Now on the next
-frame, the CPU will wait for this command buffer to finish executing before it
-records new commands into it.
-
-## Subpass dependencies
-
-Remember that the subpasses in a render pass automatically take care of image
-layout transitions. These transitions are controlled by *subpass dependencies*,
-which specify memory and execution dependencies between subpasses. We have only
-a single subpass right now, but the operations right before and right after this
-subpass also count as implicit "subpasses".
-
-There are two built-in dependencies that take care of the transition at the
-start of the render pass and at the end of the render pass, but the former does
-not occur at the right time. It assumes that the transition occurs at the start
-of the pipeline, but we haven't acquired the image yet at that point! There are
-two ways to deal with this problem. We could change the `waitStages` for the
-`imageAvailableSemaphore` to `VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT` to ensure that
-the render passes don't begin until the image is available, or we can make the
-render pass wait for the `VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT` stage.
-I've decided to go with the second option here, because it's a good excuse to
-have a look at subpass dependencies and how they work.
-
-Subpass dependencies are specified in `VkSubpassDependency` structs. Go to the
-`createRenderPass` function and add one:
-
-```c++
-VkSubpassDependency dependency{};
-dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
-dependency.dstSubpass = 0;
-```
-
-The first two fields specify the indices of the dependency and the dependent
-subpass. The special value `VK_SUBPASS_EXTERNAL` refers to the implicit subpass
-before or after the render pass depending on whether it is specified in
-`srcSubpass` or `dstSubpass`. The index `0` refers to our subpass, which is the
-first and only one. The `dstSubpass` must always be higher than `srcSubpass` to
-prevent cycles in the dependency graph (unless one of the subpasses is
-`VK_SUBPASS_EXTERNAL`).
-
-```c++
-dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-dependency.srcAccessMask = 0;
-```
-
-The next two fields specify the operations to wait on and the stages in which
-these operations occur. We need to wait for the swap chain to finish reading
-from the image before we can access it. This can be accomplished by waiting on
-the color attachment output stage itself.
-
-```c++
-dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-```
-
-The operations that should wait on this are in the color attachment stage and
-involve the writing of the color attachment. These settings will
-prevent the transition from happening until it's actually necessary (and
-allowed): when we want to start writing colors to it.
-
-```c++
-renderPassInfo.dependencyCount = 1;
-renderPassInfo.pDependencies = &dependency;
-```
-
-The `VkRenderPassCreateInfo` struct has two fields to specify an array of
-dependencies.
-
-## Presentation
-
-The last step of drawing a frame is submitting the result back to the swap chain
-to have it eventually show up on the screen. Presentation is configured through
-a `VkPresentInfoKHR` structure at the end of the `drawFrame` function.
-
-```c++
-VkPresentInfoKHR presentInfo{};
-presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-
-presentInfo.waitSemaphoreCount = 1;
-presentInfo.pWaitSemaphores = signalSemaphores;
-```
-
-The first two parameters specify which semaphores to wait on before presentation
-can happen, just like `VkSubmitInfo`. Since we want to wait on the command buffer
-to finish execution, thus our triangle being drawn, we take the semaphores
-which will be signalled and wait on them, thus we use `signalSemaphores`.
-
-
-```c++
-VkSwapchainKHR swapChains[] = {swapChain};
-presentInfo.swapchainCount = 1;
-presentInfo.pSwapchains = swapChains;
-presentInfo.pImageIndices = &imageIndex;
-```
-
-The next two parameters specify the swap chains to present images to and the
-index of the image for each swap chain. This will almost always be a single one.
-
-```c++
-presentInfo.pResults = nullptr; // Optional
-```
-
-There is one last optional parameter called `pResults`. It allows you to specify
-an array of `VkResult` values to check for every individual swap chain if
-presentation was successful. It's not necessary if you're only using a single
-swap chain, because you can simply use the return value of the present function.
-
-```c++
-vkQueuePresentKHR(presentQueue, &presentInfo);
-```
-
-The `vkQueuePresentKHR` function submits the request to present an image to the
-swap chain. We'll add error handling for both `vkAcquireNextImageKHR` and
-`vkQueuePresentKHR` in the next chapter, because their failure does not
-necessarily mean that the program should terminate, unlike the functions we've
-seen so far.
-
-If you did everything correctly up to this point, then you should now see
-something resembling the following when you run your program:
-
-![](/images/triangle.png)
-
->This colored triangle may look a bit different from the one you're used to seeing in graphics tutorials. That's because this tutorial lets the shader interpolate in linear color space and converts to sRGB color space afterwards. See [this blog post](https://medium.com/@heypete/hello-triangle-meet-swift-and-wide-color-6f9e246616d9) for a discussion of the difference.
-
-Yay! Unfortunately, you'll see that when validation layers are enabled, the
-program crashes as soon as you close it. The messages printed to the terminal
-from `debugCallback` tell us why:
-
-![](/images/semaphore_in_use.png)
-
-Remember that all of the operations in `drawFrame` are asynchronous. That means
-that when we exit the loop in `mainLoop`, drawing and presentation operations
-may still be going on. Cleaning up resources while that is happening is a bad
-idea.
-
-To fix that problem, we should wait for the logical device to finish operations
-before exiting `mainLoop` and destroying the window:
-
-```c++
-void mainLoop() {
-    while (!glfwWindowShouldClose(window)) {
-        glfwPollEvents();
-        drawFrame();
+// create.rs 또는 적절한 모듈
+fn create_sync_objects(
+    device: &ash::Device,
+) -> (
+    Vec<vk::Semaphore>,
+    Vec<vk::Semaphore>,
+    Vec<vk::Fence>,
+) {
+    let mut image_available_semaphores = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+    let mut render_finished_semaphores = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+    let mut in_flight_fences = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+
+    let semaphore_create_info = vk::SemaphoreCreateInfo::builder();
+
+    let fence_create_info = vk::FenceCreateInfo::builder()
+        .flags(vk::FenceCreateFlags::SIGNALED); // 첫 프레임에서 바로 통과하도록 신호된 상태로 생성
+
+    for _ in 0..MAX_FRAMES_IN_FLIGHT {
+        unsafe {
+            let image_available_semaphore = device
+                .create_semaphore(&semaphore_create_info, None)
+                .expect("Failed to create Semaphore Object!");
+            let render_finished_semaphore = device
+                .create_semaphore(&semaphore_create_info, None)
+                .expect("Failed to create Semaphore Object!");
+            let in_flight_fence = device
+                .create_fence(&fence_create_info, None)
+                .expect("Failed to create Fence Object!");
+
+            image_available_semaphores.push(image_available_semaphore);
+            render_finished_semaphores.push(render_finished_semaphore);
+            in_flight_fences.push(in_flight_fence);
+        }
     }
 
-    vkDeviceWaitIdle(device);
+    (
+        image_available_semaphores,
+        render_finished_semaphores,
+        in_flight_fences,
+    )
+}
+```
+`ash`에서는 `vk::...CreateInfo::builder()` 패턴을 사용하여 구조체를 생성합니다. `vkCreate...` 함수 호출은 `unsafe` 블록 안에서 이루어지며, Rust의 `Result` 타입을 반환하므로 `expect`를 사용해 오류를 처리합니다.
+
+생성된 객체들은 `Drop` 트레잇 구현에서 정리해야 합니다.
+
+```rust
+// main.rs
+impl Drop for HelloTriangleApplication {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.device_wait_idle().unwrap();
+
+            for i in 0..MAX_FRAMES_IN_FLIGHT {
+                self.device.destroy_semaphore(self.app_data.image_available_semaphores[i], None);
+                self.device.destroy_semaphore(self.app_data.render_finished_semaphores[i], None);
+                self.device.destroy_fence(self.app_data.in_flight_fences[i], None);
+            }
+            // ... 다른 리소스 정리 ...
+        }
+    }
 }
 ```
 
-You can also wait for operations in a specific command queue to be finished with
-`vkQueueWaitIdle`. These functions can be used as a very rudimentary way to
-perform synchronization. You'll see that the program now exits without problems
-when closing the window.
+## `draw_frame` 구현하기
 
-## Conclusion
+### 이전 프레임 기다리기
 
-A little over 900 lines of code later, we've finally gotten to the stage of seeing
-something pop up on the screen! Bootstrapping a Vulkan program is definitely a
-lot of work, but the take-away message is that Vulkan gives you an immense
-amount of control through its explicitness. I recommend you to take some time
-now to reread the code and build a mental model of the purpose of all of the
-Vulkan objects in the program and how they relate to each other. We'll be
-building on top of that knowledge to extend the functionality of the program
-from this point on.
+프레임 시작 시, 현재 프레임에 할당된 펜스를 기다려 이전 작업이 완료되었는지 확인합니다.
 
-The next chapter will expand the render loop to handle multiple frames in flight.
+```rust
+fn draw_frame(&mut self) {
+    let fence = self.app_data.in_flight_fences[self.current_frame];
+    
+    unsafe {
+        self.device
+            .wait_for_fences(&[fence], true, u64::MAX)
+            .expect("Failed to wait for Fence!");
+    }
+}
+```
+`wait_for_fences`는 펜스 슬라이스(`&[fence]`)를 인자로 받습니다. `true`는 모든 펜스를 기다리겠다는 의미이며, 타임아웃은 `u64::MAX`로 설정하여 비활성화합니다.
 
-[C++ code](/code/15_hello_triangle.cpp) /
-[Vertex shader](/code/09_shader_base.vert) /
-[Fragment shader](/code/09_shader_base.frag)
+*참고: C++ 버전의 첫 프레임 교착 상태 문제는 펜스를 `vk::FenceCreateFlags::SIGNALED` 플래그와 함께 생성하여 해결했습니다. `wait_for_fences`가 첫 호출에서 즉시 반환될 것입니다.*
+
+### 스왑 체인에서 이미지 가져오기
+
+다음으로 스왑 체인에서 렌더링할 이미지를 가져옵니다. 이 작업이 완료되면 `image_available_semaphores`가 신호를 받습니다.
+
+```rust
+// draw_frame 함수 내
+let image_available_semaphore = self.app_data.image_available_semaphores[self.current_frame];
+
+let (image_index, _is_suboptimal) = unsafe {
+    self.swapchain_loader
+        .acquire_next_image(
+            self.app_data.swapchain,
+            u64::MAX,
+            image_available_semaphore,
+            vk::Fence::null(),
+        )
+        .expect("Failed to acquire next image.")
+};
+
+// 펜스를 기다린 후에는 재사용하기 전에 반드시 리셋해야 합니다.
+unsafe {
+    self.device
+        .reset_fences(&[fence])
+        .expect("Failed to reset Fence!");
+}
+```
+`acquire_next_image`는 이미지 인덱스와 스왑체인이 최적 상태가 아님을 나타내는 bool 값을 튜플로 반환합니다. 지금은 `_is_suboptimal` 값을 무시하지만, 창 크기 조절 등을 처리할 때 중요해집니다. 펜스는 이미지 획득 *후*에 리셋하여 CPU-GPU 병렬 실행을 극대화할 수 있습니다.
+
+### 커맨드 버퍼 기록 및 제출
+
+이제 이미지를 사용할 수 있으므로, 해당 이미지에 그리는 커맨드 버퍼를 다시 기록하고 제출합니다.
+
+```rust
+// draw_frame 함수 내
+let command_buffer = self.command_buffers[image_index as usize];
+
+unsafe {
+    self.device
+        .reset_command_buffer(command_buffer, vk::CommandBufferResetFlags::empty())
+        .expect("Failed to reset Command Buffer!");
+}
+
+// 이전 장에서 만든 함수를 호출
+record_command_buffer(
+    &self.device,
+    command_buffer,
+    self.app_data.render_pass,
+    self.app_data.framebuffers[image_index as usize],
+    self.app_data.graphics_pipeline,
+    self.app_data.swapchain_extent,
+);
+
+let wait_semaphores = [image_available_semaphore];
+let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+let signal_semaphores = [self.app_data.render_finished_semaphores[self.current_frame]];
+
+let submit_infos = [vk::SubmitInfo::builder()
+    .wait_semaphores(&wait_semaphores)
+    .wait_dst_stage_mask(&wait_stages)
+    .command_buffers(&[command_buffer])
+    .signal_semaphores(&signal_semaphores)
+    .build()];
+
+unsafe {
+    self.device
+        .queue_submit(self.graphics_queue, &submit_infos, fence)
+        .expect("Failed to submit draw command buffer!");
+}
+```
+`ash`의 빌더 패턴을 사용하여 `VkSubmitInfo`를 간결하게 생성합니다. `queue_submit`의 마지막 인자로 `fence`를 전달하여, 이 작업이 끝나면 해당 펜스에 신호를 보내도록 합니다.
+
+### 서브패스 종속성
+
+이미지 레이아웃 전환을 올바른 시점에 수행하기 위해 서브패스 종속성을 설정해야 합니다. `acquire_next_image`가 완료된 후, 그리고 우리가 이미지에 색상을 쓰기 시작하기 전에 전환이 일어나야 합니다. `create_render_pass` 함수를 수정합니다.
+
+```rust
+// create.rs 또는 적절한 모듈
+let dependency = vk::SubpassDependency::builder()
+    .src_subpass(vk::SUBPASS_EXTERNAL)
+    .dst_subpass(0)
+    .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+    .src_access_mask(vk::AccessFlags::empty())
+    .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+    .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+    .build();
+
+let dependencies = [dependency];
+
+let render_pass_info = vk::RenderPassCreateInfo::builder()
+    .attachments(&attachments)
+    .subpasses(&subpasses)
+    .dependencies(&dependencies); // 종속성 추가
+```
+이 종속성은 외부(스왑체인 이미지 획득)에서 우리의 첫 번째 서브패스(인덱스 0)로의 전환을 제어합니다. `COLOR_ATTACHMENT_OUTPUT` 단계에서 쓰기 작업(`COLOR_ATTACHMENT_WRITE`)을 시작하기 직전에 전환이 발생하도록 보장합니다.
+
+### 프레젠테이션
+
+마지막으로 렌더링된 이미지를 화면에 표시하기 위해 프레젠테이션 큐에 제출합니다.
+
+```rust
+// draw_frame 함수 내
+let swapchains = [self.app_data.swapchain];
+let image_indices = [image_index];
+
+let present_info = vk::PresentInfoKHR::builder()
+    .wait_semaphores(&signal_semaphores) // 렌더링이 끝나면 신호를 받는 세마포어를 기다림
+    .swapchains(&swapchains)
+    .image_indices(&image_indices);
+
+unsafe {
+    self.swapchain_loader
+        .queue_present(self.present_queue, &present_info)
+        .expect("Failed to present queue.");
+}
+
+// 다음 프레임을 위해 프레임 인덱스를 업데이트
+self.current_frame = (self.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
+```
+`queue_present`는 렌더링이 완료되었음을 알리는 `render_finished_semaphore`를 기다린 후 실행됩니다. 마지막으로 `current_frame` 인덱스를 순환시켜 다음 `draw_frame` 호출에서 다음 프레임의 동기화 객체 세트를 사용하도록 합니다.
+
+### 유휴 상태 대기
+
+프로그램이 종료될 때, 모든 비동기 작업이 완료될 때까지 기다려야 리소스를 안전하게 해제할 수 있습니다. `main_loop`가 끝난 후와 `Drop` 구현의 시작 부분에서 `device_wait_idle`을 호출합니다.
+
+```rust
+// main_loop에서 이벤트 루프가 끝난 후 (실제로는 winit의 클로저 밖)
+// 또는 Drop 구현에서
+unsafe {
+    self.device.device_wait_idle().unwrap();
+}
+```
+이제 프로그램을 실행하면 화면에 삼각형이 나타나고, 창을 닫아도 유효성 검사 오류 없이 깔끔하게 종료될 것입니다.
+
+## 결론
+
+상당한 양의 코드를 통해 드디어 화면에 무언가를 띄웠습니다! Vulkan의 부트스트래핑 과정은 복잡하지만, 그만큼 명시성을 통해 강력한 제어권을 얻을 수 있습니다. 지금까지 작성한 코드를 다시 살펴보며 각 Vulkan 객체의 역할과 상호 관계를 이해하는 시간을 갖는 것이 좋습니다.
+
+다음 장에서는 여러 프레임을 동시에 처리하는 렌더링 루프를 더욱 견고하게 만들고 창 크기 변경과 같은 예외 상황을 처리하는 방법을 알아보겠습니다.

@@ -1,8 +1,4 @@
-
-This is the chapter where everything is going to come together. We're going to
-write the `drawFrame` function that will be called from the main loop to put the
-triangle on the screen. Let's start by creating the function and call it from
-`mainLoop`:
+이번 장에서는 모든 것을 하나로 합칠 시간입니다. 메인 루프에서 호출되어 삼각형을 화면에 그리는 `drawFrame` 함수를 작성할 것입니다. 먼저 함수를 만들고 `mainLoop`에서 호출해 봅시다.
 
 ```c++
 void mainLoop() {
@@ -19,159 +15,94 @@ void drawFrame() {
 }
 ```
 
-## Outline of a frame
+## 프레임의 개요
 
-At a high level, rendering a frame in Vulkan consists of a common set of steps:
+높은 수준에서 Vulkan으로 프레임을 렌더링하는 것은 다음과 같은 공통된 단계로 구성됩니다.
 
-* Wait for the previous frame to finish
-* Acquire an image from the swap chain
-* Record a command buffer which draws the scene onto that image
-* Submit the recorded command buffer
-* Present the swap chain image
+*   이전 프레임이 끝나기를 기다립니다.
+*   스왑 체인에서 이미지를 가져옵니다.
+*   가져온 이미지에 장면을 그리는 커맨드 버퍼를 기록합니다.
+*   기록된 커맨드 버퍼를 제출합니다.
+*   스왑 체인 이미지를 제시(present)합니다.
 
-While we will expand the drawing function in later chapters, for now this is the
-core of our render loop.
+이후 장에서 드로잉 함수를 더 확장하겠지만, 지금으로서는 이것이 우리 렌더링 루프의 핵심입니다.
 
-<!-- Add an image that shows an outline of the frame -->
+<!-- 프레임 개요를 보여주는 이미지 추가 -->
 
-## Synchronization
+## 동기화
 
-<!-- Maybe add images for showing synchronization -->
+<!-- 동기화를 보여주는 이미지 추가 -->
 
-A core design philosophy in Vulkan is that synchronization of execution on
-the GPU is explicit. The order of operations is up to us to define using various
-synchronization primitives which tell the driver the order we want things to run
-in. This means that many Vulkan API calls which start executing work on the GPU
-are asynchronous, the functions will return before the operation has finished.
+Vulkan의 핵심 설계 철학 중 하나는 GPU에서의 실행 동기화가 명시적이라는 것입니다. 작업 순서는 우리가 다양한 동기화 프리미티브(primitive)를 사용하여 드라이버에 원하는 실행 순서를 알려주는 것에 달려 있습니다. 이는 GPU에서 작업을 시작하는 많은 Vulkan API 호출이 비동기적임을 의미합니다. 즉, 함수는 작업이 완료되기 전에 반환됩니다.
 
-In this chapter there are a number of events that we need to order explicitly
-because they happen on the GPU, such as:
+이번 장에서는 GPU에서 발생하는 여러 이벤트를 명시적으로 순서를 정해야 합니다. 예를 들면 다음과 같습니다.
 
-* Acquire an image from the swap chain
-* Execute commands that draw onto the acquired image
-* Present that image to the screen for presentation, returning it to the swapchain
+*   스왑 체인에서 이미지 가져오기
+*   가져온 이미지에 그리는 커맨드 실행하기
+*   화면에 표시(presentation)하기 위해 이미지를 제시하고, 스왑 체인에 반환하기
 
-Each of these events is set in motion using a single function call, but are all
-executed asynchronously. The function calls will return before the operations
-are actually finished and the order of execution is also undefined. That is
-unfortunate, because each of the operations depends on the previous one
-finishing. Thus we need to explore which primitives we can use to achieve
-the desired ordering.
+이 각 이벤트는 단일 함수 호출로 시작되지만 모두 비동기적으로 실행됩니다. 함수 호출은 실제 작업이 끝나기 전에 반환되며 실행 순서 또한 정의되지 않습니다. 이는 안타까운 일입니다. 왜냐하면 각 작업은 이전 작업이 완료되는 것에 의존하기 때문입니다. 따라서 원하는 순서를 달성하기 위해 어떤 프리미티브를 사용할 수 있는지 알아봐야 합니다.
 
-### Semaphores
+### 세마포어(Semaphores)
 
-A semaphore is used to add order between queue operations. Queue operations
-refer to the work we submit to a queue, either in a command buffer or from
-within a function as we will see later. Examples of queues are the graphics
-queue and the presentation queue. Semaphores are used both to order work inside
-the same queue and between different queues.
+세마포어는 큐 작업 간에 순서를 추가하는 데 사용됩니다. 큐 작업이란 커맨드 버퍼나 나중에 보게 될 함수 내에서 큐에 제출하는 작업을 말합니다. 큐의 예로는 그래픽스 큐와 프레젠테이션 큐가 있습니다. 세마포어는 동일한 큐 내의 작업을 정렬하거나 서로 다른 큐 간의 작업을 정렬하는 데 모두 사용됩니다.
 
-There happens to be two kinds of semaphores in Vulkan, binary and timeline.
-Because only binary semaphores will be used in this tutorial, we will not
-discuss timeline semaphores. Further mention of the term semaphore exclusively
-refers to binary semaphores.
+Vulkan에는 바이너리(binary)와 타임라인(timeline) 두 종류의 세마포어가 있습니다. 이 튜토리얼에서는 바이너리 세마포어만 사용하므로 타임라인 세마포어는 다루지 않겠습니다. 앞으로 '세마포어'라는 용어는 바이너리 세마포어만을 지칭합니다.
 
-A semaphore is either unsignaled or signaled. It begins life as unsignaled. The
-way we use a semaphore to order queue operations is by providing the same
-semaphore as a 'signal' semaphore in one queue operation and as a 'wait'
-semaphore in another queue operation. For example, lets say we have semaphore S
-and queue operations A and B that we want to execute in order. What we tell
-Vulkan is that operation A will 'signal' semaphore S when it finishes executing,
-and operation B will 'wait' on semaphore S before it begins executing. When
-operation A finishes, semaphore S will be signaled, while operation B wont
-start until S is signaled. After operation B begins executing, semaphore S
-is automatically reset back to being unsignaled, allowing it to be used again.
+세마포어는 신호되지 않음(unsignaled) 또는 신호됨(signaled) 상태입니다. 처음에는 신호되지 않은 상태로 시작합니다. 세마포어를 사용하여 큐 작업의 순서를 정하는 방법은 한 큐 작업에서는 '신호(signal)' 세마포어로, 다른 큐 작업에서는 '대기(wait)' 세마포어로 동일한 세마포어를 제공하는 것입니다. 예를 들어, 순서대로 실행하고 싶은 세마포어 S와 큐 작업 A, B가 있다고 가정해 봅시다. Vulkan에 작업 A가 실행을 마치면 세마포어 S에 '신호'를 보내고, 작업 B는 실행을 시작하기 전에 세마포어 S를 '대기'하라고 알려줍니다. 작업 A가 끝나면 세마포어 S는 신호 상태가 되고, 작업 B는 S가 신호될 때까지 시작되지 않습니다. 작업 B가 실행을 시작하면 세마포어 S는 자동으로 신호되지 않은 상태로 재설정되어 다시 사용할 수 있게 됩니다.
 
-Pseudo-code of what was just described:
+방금 설명한 내용의 의사 코드(pseudo-code)는 다음과 같습니다.
 ```
-VkCommandBuffer A, B = ... // record command buffers
-VkSemaphore S = ... // create a semaphore
+VkCommandBuffer A, B = ... // 커맨드 버퍼 기록
+VkSemaphore S = ... // 세마포어 생성
 
-// enqueue A, signal S when done - starts executing immediately
+// A를 큐에 넣고, 끝나면 S에 신호 보냄 - 즉시 실행 시작
 vkQueueSubmit(work: A, signal: S, wait: None)
 
-// enqueue B, wait on S to start
+// B를 큐에 넣고, 시작하기 위해 S를 대기
 vkQueueSubmit(work: B, signal: None, wait: S)
 ```
 
-Note that in this code snippet, both calls to `vkQueueSubmit()` return
-immediately - the waiting only happens on the GPU. The CPU continues running
-without blocking. To make the CPU wait, we need a different synchronization
-primitive, which we will now describe.
+이 코드 조각에서 `vkQueueSubmit()`에 대한 두 호출은 즉시 반환됩니다. 대기는 GPU에서만 발생합니다. CPU는 블로킹(blocking)되지 않고 계속 실행됩니다. CPU를 기다리게 하려면 다른 동기화 프리미티브가 필요하며, 이제 그것에 대해 설명하겠습니다.
 
-### Fences
+### 펜스(Fences)
 
-A fence has a similar purpose, in that it is used to synchronize execution, but
-it is for ordering the execution on the CPU, otherwise known as the host.
-Simply put, if the host needs to know when the GPU has finished something, we
-use a fence.
+펜스도 실행을 동기화하는 데 사용된다는 점에서 비슷한 목적을 가지지만, 이는 CPU, 즉 호스트(host)에서의 실행 순서를 정하기 위한 것입니다. 간단히 말해, 호스트가 GPU가 무언가를 마쳤는지 알아야 할 때 펜스를 사용합니다.
 
-Similar to semaphores, fences are either in a signaled or unsignaled state.
-Whenever we submit work to execute, we can attach a fence to that work. When
-the work is finished, the fence will be signaled. Then we can make the host
-wait for the fence to be signaled, guaranteeing that the work has finished
-before the host continues.
+세마포어와 마찬가지로 펜스도 신호됨 또는 신호되지 않음 상태입니다. 작업을 제출하여 실행할 때마다 해당 작업에 펜스를 첨부할 수 있습니다. 작업이 완료되면 펜스는 신호 상태가 됩니다. 그런 다음 호스트가 펜스가 신호될 때까지 기다리게 할 수 있으며, 이를 통해 호스트가 계속 진행하기 전에 작업이 완료되었음을 보장합니다.
 
-A concrete example is taking a screenshot. Say we have already done the
-necessary work on the GPU. Now need to transfer the image from the GPU over
-to the host and then save the memory to a file. We have command buffer A which
-executes the transfer and fence F. We submit command buffer A with fence F,
-then immediately tell the host to wait for F to signal. This causes the host to
-block until command buffer A finishes execution. Thus we are safe to let the
-host save the file to disk, as the memory transfer has completed.
+구체적인 예로 스크린샷을 찍는 경우를 들어보겠습니다. GPU에서 필요한 작업을 이미 마쳤다고 가정합시다. 이제 GPU에서 호스트로 이미지를 전송한 다음 메모리를 파일에 저장해야 합니다. 전송을 실행하는 커맨드 버퍼 A와 펜스 F가 있습니다. 펜스 F와 함께 커맨드 버퍼 A를 제출한 다음, 즉시 호스트에게 F가 신호될 때까지 기다리라고 지시합니다. 이로 인해 호스트는 커맨드 버퍼 A의 실행이 끝날 때까지 블로킹됩니다. 따라서 메모리 전송이 완료되었으므로 호스트가 파일을 디스크에 안전하게 저장할 수 있습니다.
 
-Pseudo-code for what was described:
+설명한 내용에 대한 의사 코드는 다음과 같습니다.
 ```
-VkCommandBuffer A = ... // record command buffer with the transfer
-VkFence F = ... // create the fence
+VkCommandBuffer A = ... // 전송을 포함한 커맨드 버퍼 기록
+VkFence F = ... // 펜스 생성
 
-// enqueue A, start work immediately, signal F when done
+// A를 큐에 넣고, 즉시 작업 시작, 끝나면 F에 신호 보냄
 vkQueueSubmit(work: A, fence: F)
 
-vkWaitForFence(F) // blocks execution until A has finished executing
+vkWaitForFence(F) // A의 실행이 끝날 때까지 실행을 블로킹함
 
-save_screenshot_to_disk() // can't run until the transfer has finished
+save_screenshot_to_disk() // 전송이 끝나기 전까지 실행될 수 없음
 ```
 
-Unlike the semaphore example, this example *does* block host execution. This
-means the host won't do anything except wait until execution has finished. For
-this case, we had to make sure the transfer was complete before we could save
-the screenshot to disk.
+세마포어 예제와 달리, 이 예제는 호스트 실행을 *블로킹*합니다. 이는 호스트가 실행이 끝날 때까지 기다리는 것 외에는 아무것도 하지 않는다는 것을 의미합니다. 이 경우, 스크린샷을 디스크에 저장하기 전에 전송이 완료되었는지 확인해야 했습니다.
 
-In general, it is preferable to not block the host unless necessary. We want to
-feed the GPU and the host with useful work to do. Waiting on fences to signal
-is not useful work. Thus we prefer semaphores, or other synchronization
-primitives not yet covered, to synchronize our work.
+일반적으로, 필요하지 않다면 호스트를 블로킹하지 않는 것이 좋습니다. 우리는 GPU와 호스트에 유용한 작업을 계속 제공하고 싶습니다. 펜스가 신호되기를 기다리는 것은 유용한 작업이 아닙니다. 따라서 작업을 동기화하기 위해 세마포어나 아직 다루지 않은 다른 동기화 프리미티브를 선호합니다.
 
-Fences must be reset manually to put them back into the unsignaled state. This
-is because fences are used to control the execution of the host, and so the
-host gets to decide when to reset the fence. Contrast this to semaphores which
-are used to order work on the GPU without the host being involved.
+펜스는 수동으로 재설정하여 신호되지 않은 상태로 되돌려야 합니다. 이는 펜스가 호스트의 실행을 제어하는 데 사용되므로, 언제 펜스를 재설정할지 호스트가 결정하기 때문입니다. 이는 호스트의 개입 없이 GPU 상의 작업 순서를 정하는 데 사용되는 세마포어와 대조적입니다.
 
-In summary, semaphores are used to specify the execution order of operations on
-the GPU while fences are used to keep the CPU and GPU in sync with each-other.
+요약하자면, 세마포어는 GPU에서의 작업 실행 순서를 지정하는 데 사용되고, 펜스는 CPU와 GPU를 서로 동기화 상태로 유지하는 데 사용됩니다.
 
-### What to choose?
+### 무엇을 선택해야 할까?
 
-We have two synchronization primitives to use and conveniently two places to
-apply synchronization: Swapchain operations and waiting for the previous frame
-to finish. We want to use semaphores for swapchain operations because they
-happen on the GPU, thus we don't want to make the host wait around if we can
-help it. For waiting on the previous frame to finish, we want to use fences
-for the opposite reason, because we need the host to wait. This is so we don't
-draw more than one frame at a time. Because we re-record the command buffer
-every frame, we cannot record the next frame's work to the command buffer
-until the current frame has finished executing, as we don't want to overwrite
-the current contents of the command buffer while the GPU is using it.
+우리에게는 두 가지 동기화 프리미티브가 있고, 마침 동기화를 적용할 두 곳이 있습니다: 스왑 체인 작업과 이전 프레임이 끝나기를 기다리는 것. 스왑 체인 작업은 GPU에서 발생하므로 가능하다면 호스트를 기다리게 하고 싶지 않으므로 세마포어를 사용하고 싶습니다. 이전 프레임이 끝나기를 기다리는 것에는 반대의 이유로 펜스를 사용하고 싶습니다. 왜냐하면 호스트가 기다려야 하기 때문입니다. 이는 한 번에 한 프레임 이상을 그리지 않도록 하기 위함입니다. 우리는 매 프레임마다 커맨드 버퍼를 다시 기록하므로, 현재 프레임이 실행을 마칠 때까지 다음 프레임의 작업을 커맨드 버퍼에 기록할 수 없습니다. GPU가 커맨드 버퍼를 사용하는 동안 현재 내용을 덮어쓰고 싶지 않기 때문입니다.
 
-## Creating the synchronization objects
+## 동기화 객체 생성하기
 
-We'll need one semaphore to signal that an image has been acquired from the
-swapchain and is ready for rendering, another one to signal that rendering has
-finished and presentation can happen, and a fence to make sure only one frame
-is rendering at a time.
+이미지가 스왑 체인에서 사용 가능해져 렌더링 준비가 되었음을 알리는 세마포어 하나, 렌더링이 끝나 프레젠테이션이 가능함을 알리는 세마포어 하나, 그리고 한 번에 한 프레임만 렌더링되도록 보장하는 펜스 하나가 필요합니다.
 
-Create three class members to store these semaphore objects and fence object:
+이 세마포어 객체들과 펜스 객체를 저장할 세 개의 클래스 멤버를 만듭니다.
 
 ```c++
 VkSemaphore imageAvailableSemaphore;
@@ -179,8 +110,7 @@ VkSemaphore renderFinishedSemaphore;
 VkFence inFlightFence;
 ```
 
-To create the semaphores, we'll add the last `create` function for this part of
-the tutorial: `createSyncObjects`:
+세마포어를 생성하기 위해 튜토리얼의 이 부분에 대한 마지막 `create` 함수인 `createSyncObjects`를 추가합니다.
 
 ```c++
 void initVulkan() {
@@ -206,9 +136,7 @@ void createSyncObjects() {
 }
 ```
 
-Creating semaphores requires filling in the `VkSemaphoreCreateInfo`, but in the
-current version of the API it doesn't actually have any required fields besides
-`sType`:
+세마포어를 생성하려면 `VkSemaphoreCreateInfo`를 채워야 하지만, 현재 API 버전에서는 `sType` 외에는 필수 필드가 없습니다.
 
 ```c++
 void createSyncObjects() {
@@ -217,18 +145,16 @@ void createSyncObjects() {
 }
 ```
 
-Future versions of the Vulkan API or extensions may add functionality for the
-`flags` and `pNext` parameters like it does for the other structures.
+미래의 Vulkan API 버전이나 확장 기능은 다른 구조체와 마찬가지로 `flags`와 `pNext` 파라미터에 기능을 추가할 수 있습니다.
 
-Creating a fence requires filling in the `VkFenceCreateInfo`:
+펜스를 생성하려면 `VkFenceCreateInfo`를 채워야 합니다.
 
 ```c++
 VkFenceCreateInfo fenceInfo{};
 fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
 ```
 
-Creating the semaphores and fence follows the familiar pattern with
-`vkCreateSemaphore` & `vkCreateFence`:
+세마포어와 펜스 생성은 `vkCreateSemaphore`와 `vkCreateFence`를 사용하는 익숙한 패턴을 따릅니다.
 
 ```c++
 if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphore) != VK_SUCCESS ||
@@ -238,8 +164,7 @@ if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphore)
 }
 ```
 
-The semaphores and fence should be cleaned up at the end of the program, when
-all commands have finished and no more synchronization is necessary:
+세마포어와 펜스는 프로그램이 끝날 때, 모든 커맨드가 완료되고 더 이상 동기화가 필요 없을 때 정리되어야 합니다.
 
 ```c++
 void cleanup() {
@@ -248,13 +173,11 @@ void cleanup() {
     vkDestroyFence(device, inFlightFence, nullptr);
 ```
 
-Onto the main drawing function!
+이제 메인 드로잉 함수로 넘어가 봅시다!
 
-## Waiting for the previous frame
+## 이전 프레임 기다리기
 
-At the start of the frame, we want to wait until the previous frame has
-finished, so that the command buffer and semaphores are available to use. To do
-that, we call `vkWaitForFences`:
+프레임의 시작에서, 우리는 이전 프레임이 끝나기를 기다려서 커맨드 버퍼와 세마포어를 사용할 수 있게 하고 싶습니다. 이를 위해 `vkWaitForFences`를 호출합니다.
 
 ```c++
 void drawFrame() {
@@ -262,31 +185,19 @@ void drawFrame() {
 }
 ```
 
-The `vkWaitForFences` function takes an array of fences and waits on the host
-for either any or all of the fences to be signaled before returning. The
-`VK_TRUE` we pass here indicates that we want to wait for all fences, but in
-the case of a single one it doesn't matter. This function also has a timeout
-parameter that we set to the maximum value of a 64 bit unsigned integer,
-`UINT64_MAX`, which effectively disables the timeout.
+`vkWaitForFences` 함수는 펜스 배열을 받아, 배열의 일부 또는 모든 펜스가 신호될 때까지 호스트에서 기다린 후 반환합니다. 여기서 전달하는 `VK_TRUE`는 모든 펜스를 기다리겠다는 의미이지만, 펜스가 하나일 경우에는 상관없습니다. 이 함수에는 타임아웃 파라미터도 있는데, 우리는 64비트 부호 없는 정수의 최댓값인 `UINT64_MAX`를 설정하여 타임아웃을 사실상 비활성화합니다.
 
-After waiting, we need to manually reset the fence to the unsignaled state with
-the `vkResetFences` call:
+기다린 후에는 `vkResetFences` 호출로 펜스를 수동으로 신호되지 않은 상태로 재설정해야 합니다.
+
 ```c++
     vkResetFences(device, 1, &inFlightFence);
 ```
 
-Before we can proceed, there is a slight hiccup in our design. On the first
-frame we call `drawFrame()`, which immediately waits on `inFlightFence` to
-be signaled. `inFlightFence` is only signaled after a frame has finished
-rendering, yet since this is the first frame, there are no previous frames in
-which to signal the fence! Thus `vkWaitForFences()` blocks indefinitely,
-waiting on something which will never happen.
+계속 진행하기 전에 우리 설계에 약간의 문제가 있습니다. 첫 프레임에서 `drawFrame()`을 호출하면 즉시 `inFlightFence`가 신호되기를 기다립니다. `inFlightFence`는 프레임 렌더링이 완료된 후에만 신호되는데, 지금은 첫 프레임이므로 펜스에 신호를 보낼 이전 프레임이 없습니다! 따라서 `vkWaitForFences()`는 결코 일어나지 않을 일을 기다리며 무한정 블로킹됩니다.
 
-Of the many solutions to this dilemma, there is a clever workaround built into
-the API. Create the fence in the signaled state, so that the first call to
-`vkWaitForFences()` returns immediately since the fence is already signaled.
+이 딜레마에 대한 많은 해결책 중, API에 내장된 영리한 해결 방법이 있습니다. 펜스를 신호된 상태로 생성하여 첫 번째 `vkWaitForFences()` 호출이 이미 신호된 펜스 덕분에 즉시 반환되도록 하는 것입니다.
 
-To do this, we add the `VK_FENCE_CREATE_SIGNALED_BIT` flag to the `VkFenceCreateInfo`:
+이를 위해 `VkFenceCreateInfo`에 `VK_FENCE_CREATE_SIGNALED_BIT` 플래그를 추가합니다.
 
 ```c++
 void createSyncObjects() {
@@ -300,11 +211,9 @@ void createSyncObjects() {
 }
 ```
 
-## Acquiring an image from the swap chain
+## 스왑 체인에서 이미지 가져오기
 
-The next thing we need to do in the `drawFrame` function is acquire an image
-from the swap chain. Recall that the swap chain is an extension feature, so we
-must use a function with the `vk*KHR` naming convention:
+`drawFrame` 함수에서 다음으로 할 일은 스왑 체인에서 이미지를 가져오는 것입니다. 스왑 체인은 확장 기능이므로 `vk*KHR` 명명 규칙을 가진 함수를 사용해야 한다는 것을 기억하세요.
 
 ```c++
 void drawFrame() {
@@ -315,47 +224,33 @@ void drawFrame() {
 }
 ```
 
-The first two parameters of `vkAcquireNextImageKHR` are the logical device and
-the swap chain from which we wish to acquire an image. The third parameter
-specifies a timeout in nanoseconds for an image to become available. Using the
-maximum value of a 64 bit unsigned integer means we effectively disable the
-timeout.
+`vkAcquireNextImageKHR`의 첫 두 파라미터는 로지컬 디바이스와 이미지를 가져올 스왑 체인입니다. 세 번째 파라미터는 이미지가 사용 가능해질 때까지의 타임아웃을 나노초 단위로 지정합니다. 64비트 부호 없는 정수의 최댓값을 사용하면 타임아웃을 효과적으로 비활성화합니다.
 
-The next two parameters specify synchronization objects that are to be signaled
-when the presentation engine is finished using the image. That's the point in
-time where we can start drawing to it. It is possible to specify a semaphore,
-fence or both. We're going to use our `imageAvailableSemaphore` for that purpose
-here.
+다음 두 파라미터는 프레젠테이션 엔진이 이미지 사용을 마쳤을 때 신호를 보낼 동기화 객체를 지정합니다. 이 시점이 바로 우리가 이미지에 그리기를 시작할 수 있는 때입니다. 세마포어, 펜스 또는 둘 다 지정할 수 있습니다. 여기서는 `imageAvailableSemaphore`를 그 목적으로 사용할 것입니다.
 
-The last parameter specifies a variable to output the index of the swap chain
-image that has become available. The index refers to the `VkImage` in our
-`swapChainImages` array. We're going to use that index to pick the `VkFrameBuffer`.
+마지막 파라미터는 사용 가능해진 스왑 체인 이미지의 인덱스를 출력할 변수를 지정합니다. 이 인덱스는 `swapChainImages` 배열의 `VkImage`를 가리킵니다. 우리는 이 인덱스를 사용하여 `VkFramebuffer`를 선택할 것입니다.
 
-## Recording the command buffer
+## 커맨드 버퍼 기록하기
 
-With the imageIndex specifying the swap chain image to use in hand, we can now
-record the command buffer. First, we call `vkResetCommandBuffer` on the command
-buffer to make sure it is able to be recorded.
+사용할 스왑 체인 이미지를 지정하는 `imageIndex`를 확보했으므로 이제 커맨드 버퍼를 기록할 수 있습니다. 먼저 커맨드 버퍼에 `vkResetCommandBuffer`를 호출하여 기록할 수 있는 상태인지 확인합니다.
 
 ```c++
 vkResetCommandBuffer(commandBuffer, 0);
 ```
 
-The second parameter of `vkResetCommandBuffer` is a `VkCommandBufferResetFlagBits`
-flag. Since we don't want to do anything special, we leave it as 0.
+`vkResetCommandBuffer`의 두 번째 파라미터는 `VkCommandBufferResetFlagBits` 플래그입니다. 특별한 작업을 원하지 않으므로 0으로 둡니다.
 
-Now call the function `recordCommandBuffer` to record the commands we want.
+이제 `recordCommandBuffer` 함수를 호출하여 원하는 커맨드를 기록합니다.
 
 ```c++
 recordCommandBuffer(commandBuffer, imageIndex);
 ```
 
-With a fully recorded command buffer, we can now submit it.
+완전히 기록된 커맨드 버퍼가 있으므로 이제 제출할 수 있습니다.
 
-## Submitting the command buffer
+## 커맨드 버퍼 제출하기
 
-Queue submission and synchronization is configured through parameters in the
-`VkSubmitInfo` structure.
+큐 제출 및 동기화는 `VkSubmitInfo` 구조체의 파라미터를 통해 구성됩니다.
 
 ```c++
 VkSubmitInfo submitInfo{};
@@ -368,21 +263,14 @@ submitInfo.pWaitSemaphores = waitSemaphores;
 submitInfo.pWaitDstStageMask = waitStages;
 ```
 
-The first three parameters specify which semaphores to wait on before execution
-begins and in which stage(s) of the pipeline to wait. We want to wait with
-writing colors to the image until it's available, so we're specifying the stage
-of the graphics pipeline that writes to the color attachment. That means that
-theoretically the implementation can already start executing our vertex shader
-and such while the image is not yet available. Each entry in the `waitStages`
-array corresponds to the semaphore with the same index in `pWaitSemaphores`.
+처음 세 파라미터는 실행이 시작되기 전에 대기할 세마포어와 파이프라인의 어느 단계에서 대기할지를 지정합니다. 우리는 이미지가 사용 가능해질 때까지 이미지에 색상을 쓰는 것을 기다리고 싶으므로, 컬러 어태치먼트에 쓰는 그래픽스 파이프라인 단계를 지정합니다. 이론적으로 이는 구현이 이미지가 아직 사용 가능하지 않은 동안에도 버텍스 셰이더 등을 실행 시작할 수 있음을 의미합니다. `waitStages` 배열의 각 항목은 `pWaitSemaphores`의 동일한 인덱스를 가진 세마포어에 해당합니다.
 
 ```c++
 submitInfo.commandBufferCount = 1;
 submitInfo.pCommandBuffers = &commandBuffer;
 ```
 
-The next two parameters specify which command buffers to actually submit for
-execution. We simply submit the single command buffer we have.
+다음 두 파라미터는 실제로 실행을 위해 제출할 커맨드 버퍼를 지정합니다. 우리는 가지고 있는 단일 커맨드 버퍼를 간단히 제출합니다.
 
 ```c++
 VkSemaphore signalSemaphores[] = {renderFinishedSemaphore};
@@ -390,9 +278,7 @@ submitInfo.signalSemaphoreCount = 1;
 submitInfo.pSignalSemaphores = signalSemaphores;
 ```
 
-The `signalSemaphoreCount` and `pSignalSemaphores` parameters specify which
-semaphores to signal once the command buffer(s) have finished execution. In our
-case we're using the `renderFinishedSemaphore` for that purpose.
+`signalSemaphoreCount`와 `pSignalSemaphores` 파라미터는 커맨드 버퍼(들)의 실행이 완료되면 신호를 보낼 세마포어를 지정합니다. 우리의 경우 `renderFinishedSemaphore`를 그 목적으로 사용합니다.
 
 ```c++
 if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFence) != VK_SUCCESS) {
@@ -400,36 +286,15 @@ if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFence) != VK_SUCCESS) {
 }
 ```
 
-We can now submit the command buffer to the graphics queue using
-`vkQueueSubmit`. The function takes an array of `VkSubmitInfo` structures as
-argument for efficiency when the workload is much larger. The last parameter
-references an optional fence that will be signaled when the command buffers
-finish execution. This allows us to know when it is safe for the command
-buffer to be reused, thus we want to give it `inFlightFence`. Now on the next
-frame, the CPU will wait for this command buffer to finish executing before it
-records new commands into it.
+이제 `vkQueueSubmit`을 사용하여 그래픽스 큐에 커맨드 버퍼를 제출할 수 있습니다. 이 함수는 작업량이 훨씬 클 때 효율성을 위해 `VkSubmitInfo` 구조체 배열을 인자로 받습니다. 마지막 파라미터는 커맨드 버퍼 실행이 완료될 때 신호를 받을 선택적 펜스를 참조합니다. 이를 통해 커맨드 버퍼를 재사용해도 안전한 시점을 알 수 있으므로, `inFlightFence`를 전달하고 싶습니다. 이제 다음 프레임에서 CPU는 이 커맨드 버퍼의 실행이 끝날 때까지 기다린 후에 새로운 커맨드를 기록하게 됩니다.
 
-## Subpass dependencies
+## 서브패스 종속성(Subpass dependencies)
 
-Remember that the subpasses in a render pass automatically take care of image
-layout transitions. These transitions are controlled by *subpass dependencies*,
-which specify memory and execution dependencies between subpasses. We have only
-a single subpass right now, but the operations right before and right after this
-subpass also count as implicit "subpasses".
+렌더 패스의 서브패스들은 이미지 레이아웃 전환을 자동으로 처리한다는 것을 기억하세요. 이러한 전환은 서브패스 간의 메모리 및 실행 종속성을 지정하는 *서브패스 종속성*에 의해 제어됩니다. 현재는 단일 서브패스만 있지만, 이 서브패스 직전과 직후의 작업들도 암시적인 "서브패스"로 간주됩니다.
 
-There are two built-in dependencies that take care of the transition at the
-start of the render pass and at the end of the render pass, but the former does
-not occur at the right time. It assumes that the transition occurs at the start
-of the pipeline, but we haven't acquired the image yet at that point! There are
-two ways to deal with this problem. We could change the `waitStages` for the
-`imageAvailableSemaphore` to `VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT` to ensure that
-the render passes don't begin until the image is available, or we can make the
-render pass wait for the `VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT` stage.
-I've decided to go with the second option here, because it's a good excuse to
-have a look at subpass dependencies and how they work.
+렌더 패스 시작과 끝에서 전환을 처리하는 두 개의 내장 종속성이 있지만, 전자는 올바른 시점에 발생하지 않습니다. 이는 전환이 파이프라인의 시작에서 발생한다고 가정하지만, 그 시점에는 아직 이미지를 획득하지 못했습니다! 이 문제를 해결하는 두 가지 방법이 있습니다. `imageAvailableSemaphore`의 `waitStages`를 `VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT`로 변경하여 렌더 패스가 이미지가 사용 가능해질 때까지 시작되지 않도록 하거나, 렌더 패스가 `VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT` 단계를 기다리게 할 수 있습니다. 저는 여기서 두 번째 옵션을 선택했습니다. 왜냐하면 서브패스 종속성과 그것이 어떻게 작동하는지 살펴볼 좋은 기회이기 때문입니다.
 
-Subpass dependencies are specified in `VkSubpassDependency` structs. Go to the
-`createRenderPass` function and add one:
+서브패스 종속성은 `VkSubpassDependency` 구조체에 명시됩니다. `createRenderPass` 함수로 가서 하나 추가합시다.
 
 ```c++
 VkSubpassDependency dependency{};
@@ -437,47 +302,32 @@ dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
 dependency.dstSubpass = 0;
 ```
 
-The first two fields specify the indices of the dependency and the dependent
-subpass. The special value `VK_SUBPASS_EXTERNAL` refers to the implicit subpass
-before or after the render pass depending on whether it is specified in
-`srcSubpass` or `dstSubpass`. The index `0` refers to our subpass, which is the
-first and only one. The `dstSubpass` must always be higher than `srcSubpass` to
-prevent cycles in the dependency graph (unless one of the subpasses is
-`VK_SUBPASS_EXTERNAL`).
+처음 두 필드는 종속성과 종속되는 서브패스의 인덱스를 지정합니다. 특별한 값 `VK_SUBPASS_EXTERNAL`은 `srcSubpass`에 지정되었는지 `dstSubpass`에 지정되었는지에 따라 렌더 패스 전후의 암시적 서브패스를 나타냅니다. 인덱스 `0`은 우리의 서브패스를 가리키며, 이는 첫 번째이자 유일한 서브패스입니다. `dstSubpass`는 종속성 그래프에서 순환을 방지하기 위해 항상 `srcSubpass`보다 높아야 합니다(서브패스 중 하나가 `VK_SUBPASS_EXTERNAL`이 아닌 경우).
 
 ```c++
 dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 dependency.srcAccessMask = 0;
 ```
 
-The next two fields specify the operations to wait on and the stages in which
-these operations occur. We need to wait for the swap chain to finish reading
-from the image before we can access it. This can be accomplished by waiting on
-the color attachment output stage itself.
+다음 두 필드는 대기할 작업과 이러한 작업이 발생하는 단계를 지정합니다. 우리가 이미지에 접근하기 전에 스왑 체인이 이미지 읽기를 마칠 때까지 기다려야 합니다. 이는 컬러 어태치먼트 출력 단계 자체를 기다림으로써 달성할 수 있습니다.
 
 ```c++
 dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 ```
 
-The operations that should wait on this are in the color attachment stage and
-involve the writing of the color attachment. These settings will
-prevent the transition from happening until it's actually necessary (and
-allowed): when we want to start writing colors to it.
+이것을 기다려야 하는 작업은 컬러 어태치먼트 단계에 있으며, 컬러 어태치먼트 쓰기를 포함합니다. 이러한 설정은 실제로 필요하고 허용될 때까지(즉, 우리가 색상을 쓰기 시작하고 싶을 때까지) 전환이 일어나지 않도록 막아줍니다.
 
 ```c++
 renderPassInfo.dependencyCount = 1;
 renderPassInfo.pDependencies = &dependency;
 ```
 
-The `VkRenderPassCreateInfo` struct has two fields to specify an array of
-dependencies.
+`VkRenderPassCreateInfo` 구조체에는 종속성 배열을 지정하는 두 개의 필드가 있습니다.
 
-## Presentation
+## 프레젠테이션(Presentation)
 
-The last step of drawing a frame is submitting the result back to the swap chain
-to have it eventually show up on the screen. Presentation is configured through
-a `VkPresentInfoKHR` structure at the end of the `drawFrame` function.
+프레임을 그리는 마지막 단계는 결과를 다시 스왑 체인에 제출하여最终적으로 화면에 나타나게 하는 것입니다. 프레젠테이션은 `drawFrame` 함수 끝에서 `VkPresentInfoKHR` 구조체를 통해 구성됩니다.
 
 ```c++
 VkPresentInfoKHR presentInfo{};
@@ -487,11 +337,7 @@ presentInfo.waitSemaphoreCount = 1;
 presentInfo.pWaitSemaphores = signalSemaphores;
 ```
 
-The first two parameters specify which semaphores to wait on before presentation
-can happen, just like `VkSubmitInfo`. Since we want to wait on the command buffer
-to finish execution, thus our triangle being drawn, we take the semaphores
-which will be signalled and wait on them, thus we use `signalSemaphores`.
-
+처음 두 파라미터는 `VkSubmitInfo`와 마찬가지로 프레젠테이션이 일어나기 전에 대기할 세마포어를 지정합니다. 우리는 커맨드 버퍼의 실행이 끝나기를, 즉 삼각형이 그려지기를 기다리고 싶으므로 신호를 받을 세마포어를 가져와서 그것들을 기다립니다. 따라서 `signalSemaphores`를 사용합니다.
 
 ```c++
 VkSwapchainKHR swapChains[] = {swapChain};
@@ -500,48 +346,33 @@ presentInfo.pSwapchains = swapChains;
 presentInfo.pImageIndices = &imageIndex;
 ```
 
-The next two parameters specify the swap chains to present images to and the
-index of the image for each swap chain. This will almost always be a single one.
+다음 두 파라미터는 이미지를 제시할 스왑 체인과 각 스왑 체인에 대한 이미지의 인덱스를 지정합니다. 이것은 거의 항상 단일 스왑 체인일 것입니다.
 
 ```c++
 presentInfo.pResults = nullptr; // Optional
 ```
 
-There is one last optional parameter called `pResults`. It allows you to specify
-an array of `VkResult` values to check for every individual swap chain if
-presentation was successful. It's not necessary if you're only using a single
-swap chain, because you can simply use the return value of the present function.
+`pResults`라는 마지막 선택적 파라미터가 있습니다. 이를 통해 각 개별 스왑 체인에 대해 프레젠테이션이 성공했는지 확인할 `VkResult` 값의 배열을 지정할 수 있습니다. 단일 스왑 체인만 사용하는 경우에는 필요하지 않습니다. 왜냐하면 프레젠테이션 함수의 반환 값을 간단히 사용할 수 있기 때문입니다.
 
 ```c++
 vkQueuePresentKHR(presentQueue, &presentInfo);
 ```
 
-The `vkQueuePresentKHR` function submits the request to present an image to the
-swap chain. We'll add error handling for both `vkAcquireNextImageKHR` and
-`vkQueuePresentKHR` in the next chapter, because their failure does not
-necessarily mean that the program should terminate, unlike the functions we've
-seen so far.
+`vkQueuePresentKHR` 함수는 스왑 체인에 이미지를 제시하라는 요청을 제출합니다. 다음 장에서는 `vkAcquireNextImageKHR`와 `vkQueuePresentKHR`에 대한 오류 처리를 추가할 것입니다. 왜냐하면 지금까지 본 함수들과 달리 이 함수들의 실패가 반드시 프로그램 종료를 의미하지는 않기 때문입니다.
 
-If you did everything correctly up to this point, then you should now see
-something resembling the following when you run your program:
+지금까지 모든 것을 올바르게 했다면, 프로그램을 실행했을 때 다음과 유사한 것을 보게 될 것입니다.
 
 ![](/images/triangle.png)
 
->This colored triangle may look a bit different from the one you're used to seeing in graphics tutorials. That's because this tutorial lets the shader interpolate in linear color space and converts to sRGB color space afterwards. See [this blog post](https://medium.com/@heypete/hello-triangle-meet-swift-and-wide-color-6f9e246616d9) for a discussion of the difference.
+> 이 색상의 삼각형은 그래픽스 튜토리얼에서 흔히 보던 것과 약간 다를 수 있습니다. 이 튜토리얼은 셰이더가 선형(linear) 색 공간에서 보간하고 나중에 sRGB 색 공간으로 변환하기 때문입니다. 차이점에 대한 논의는 [이 블로그 포스트](https://medium.com/@heypete/hello-triangle-meet-swift-and-wide-color-6f9e246616d9)를 참조하세요.
 
-Yay! Unfortunately, you'll see that when validation layers are enabled, the
-program crashes as soon as you close it. The messages printed to the terminal
-from `debugCallback` tell us why:
+만세! 안타깝게도, 유효성 검사 레이어를 활성화하면 프로그램을 닫자마자 충돌하는 것을 보게 될 것입니다. `debugCallback`에서 터미널에 출력된 메시지가 그 이유를 알려줍니다.
 
 ![](/images/semaphore_in_use.png)
 
-Remember that all of the operations in `drawFrame` are asynchronous. That means
-that when we exit the loop in `mainLoop`, drawing and presentation operations
-may still be going on. Cleaning up resources while that is happening is a bad
-idea.
+`drawFrame`의 모든 작업은 비동기적이라는 것을 기억하세요. 즉, `mainLoop`에서 루프를 빠져나올 때 드로잉 및 프레젠테이션 작업이 여전히 진행 중일 수 있습니다. 그 와중에 리소스를 정리하는 것은 좋지 않은 생각입니다.
 
-To fix that problem, we should wait for the logical device to finish operations
-before exiting `mainLoop` and destroying the window:
+이 문제를 해결하려면 `mainLoop`를 종료하고 창을 파괴하기 전에 로지컬 디바이스가 작업을 마칠 때까지 기다려야 합니다.
 
 ```c++
 void mainLoop() {
@@ -554,24 +385,14 @@ void mainLoop() {
 }
 ```
 
-You can also wait for operations in a specific command queue to be finished with
-`vkQueueWaitIdle`. These functions can be used as a very rudimentary way to
-perform synchronization. You'll see that the program now exits without problems
-when closing the window.
+특정 커맨드 큐의 작업이 완료될 때까지 `vkQueueWaitIdle`로 기다릴 수도 있습니다. 이 함수들은 매우 초보적인 동기화 방법으로 사용될 수 있습니다. 이제 창을 닫을 때 프로그램이 문제없이 종료되는 것을 볼 수 있을 것입니다.
 
-## Conclusion
+## 결론
 
-A little over 900 lines of code later, we've finally gotten to the stage of seeing
-something pop up on the screen! Bootstrapping a Vulkan program is definitely a
-lot of work, but the take-away message is that Vulkan gives you an immense
-amount of control through its explicitness. I recommend you to take some time
-now to reread the code and build a mental model of the purpose of all of the
-Vulkan objects in the program and how they relate to each other. We'll be
-building on top of that knowledge to extend the functionality of the program
-from this point on.
+900줄이 넘는 코드를 작성한 끝에 마침내 화면에 무언가 나타나는 단계를 마쳤습니다! Vulkan 프로그램을 부트스트래핑하는 것은 확실히 많은 작업이지만, 여기서 얻을 수 있는 교훈은 Vulkan이 명시성을 통해 엄청난 제어권을 제공한다는 것입니다. 지금 시간을 내어 코드를 다시 읽어보고 프로그램의 모든 Vulkan 객체의 목적과 서로 어떻게 관련되어 있는지에 대한 정신 모델을 구축하는 것을 추천합니다. 이제부터 이 지식을 바탕으로 프로그램의 기능을 확장해 나갈 것입니다.
 
-The next chapter will expand the render loop to handle multiple frames in flight.
+다음 장에서는 여러 프레임을 동시에 처리하도록 렌더링 루프를 확장할 것입니다.
 
-[C++ code](/code/15_hello_triangle.cpp) /
-[Vertex shader](/code/09_shader_base.vert) /
-[Fragment shader](/code/09_shader_base.frag)
+[C++ 코드](/code/15_hello_triangle.cpp) /
+[버텍스 셰이더](/code/09_shader_base.vert) /
+[프래그먼트 셰이더](/code/09_shader_base.frag)

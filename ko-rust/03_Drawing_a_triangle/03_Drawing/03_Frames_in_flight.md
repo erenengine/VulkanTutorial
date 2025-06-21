@@ -1,176 +1,182 @@
-## Frames in flight
+## 동시에 여러 프레임 렌더링하기 (Frames in flight)
 
-Right now our render loop has one glaring flaw. We are required to wait on the
-previous frame to finish before we can start rendering the next which results
-in unnecessary idling of the host. 
+현재 우리의 렌더 루프에는 한 가지 명백한 결함이 있습니다. 이전 프레임의 렌더링이 끝나기를 기다려야만 다음 프레임의 렌더링을 시작할 수 있다는 점인데, 이는 호스트(CPU)의 불필요한 유휴 상태를 유발합니다.
 
 <!-- insert diagram showing our current render loop and the 'multi frame in flight' render loop -->
 
-The way to fix this is to allow multiple frames to be *in-flight* at once, that 
-is to say, allow the rendering of one frame to not interfere with the recording
-of the next. How do we do this? Any resource that is accessed and modified
-during rendering must be duplicated. Thus, we need multiple command buffers,
-semaphores, and fences. In later chapters we will also add multiple instances
-of other resources, so we will see this concept reappear.
+이 문제를 해결하는 방법은 여러 프레임을 동시에 *작업 중(in-flight)* 상태로 두는 것입니다. 즉, 한 프레임의 렌더링이 다음 프레임의 기록을 방해하지 않도록 하는 것입니다. 어떻게 이렇게 할 수 있을까요? 렌더링 중에 접근하고 수정하는 모든 리소스를 복제해야 합니다. 따라서 여러 개의 커맨드 버퍼, 세마포어, 펜스가 필요합니다. 이후 챕터에서는 다른 리소스들의 여러 인스턴스도 추가할 것이므로, 이 개념은 다시 등장하게 될 것입니다.
 
-Start by adding a constant at the top of the program that defines how many
-frames should be processed concurrently:
+먼저 프로그램 상단에 동시에 처리할 프레임 수를 정의하는 상수를 추가합니다. Rust에서는 `usize` 타입을 사용하는 것이 일반적입니다.
 
-```c++
-const int MAX_FRAMES_IN_FLIGHT = 2;
+```rust
+const MAX_FRAMES_IN_FLIGHT: usize = 2;
 ```
 
-We choose the number 2 because we don't want the CPU to get *too* far ahead of
-the GPU. With 2 frames in flight, the CPU and the GPU can be working on their
-own tasks at the same time. If the CPU finishes early, it will wait till the
-GPU finishes rendering before submitting more work. With 3 or more frames in
-flight, the CPU could get ahead of the GPU, adding frames of latency.
-Generally, extra latency isn't desired. But giving the application control over
-the number of frames in flight is another example of Vulkan being explicit.
+2를 선택한 이유는 CPU가 GPU보다 *너무* 앞서 나가는 것을 원치 않기 때문입니다. 2개의 프레임이 동시 실행되면, CPU와 GPU가 동시에 각자의 작업을 처리할 수 있습니다. 만약 CPU가 먼저 작업을 마치면, GPU가 렌더링을 마칠 때까지 기다렸다가 다음 작업을 제출합니다. 3개 이상의 프레임을 사용하면 CPU가 GPU를 앞질러 지연 시간(latency)을 추가할 수 있습니다. 일반적으로 추가적인 지연 시간은 바람직하지 않습니다. 하지만 애플리케이션에 동시 실행 프레임 수를 제어할 수 있는 권한을 주는 것은 Vulkan의 명시적인(explicit) 특성을 보여주는 또 다른 예시입니다.
 
-Each frame should have its own command buffer, set of semaphores, and fence.
-Rename and then change them to be `std::vector`s of the objects:
+각 프레임은 자체적인 커맨드 버퍼, 세마포어 집합, 펜스를 가져야 합니다. 기존 객체들을 `Vec`으로 변경합니다. `App` 구조체 내의 필드들을 다음과 같이 수정합니다.
 
-```c++
-std::vector<VkCommandBuffer> commandBuffers;
-
-...
-
-std::vector<VkSemaphore> imageAvailableSemaphores;
-std::vector<VkSemaphore> renderFinishedSemaphores;
-std::vector<VkFence> inFlightFences;
-```
-
-Then we need to create multiple command buffers. Rename `createCommandBuffer`
-to `createCommandBuffers`. Next we need to resize the command buffers vector
-to the size of `MAX_FRAMES_IN_FLIGHT`, alter the `VkCommandBufferAllocateInfo`
-to contain that many command buffers, and then change the destination to our
-vector of command buffers:
-
-```c++
-void createCommandBuffers() {
-    commandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
-    ...
-    allocInfo.commandBufferCount = (uint32_t) commandBuffers.size();
-
-    if (vkAllocateCommandBuffers(device, &allocInfo, commandBuffers.data()) != VK_SUCCESS) {
-        throw std::runtime_error("failed to allocate command buffers!");
-    }
+```rust
+struct App {
+    // ...
+    command_buffers: Vec<vk::CommandBuffer>,
+    image_available_semaphores: Vec<vk::Semaphore>,
+    render_finished_semaphores: Vec<vk::Semaphore>,
+    in_flight_fences: Vec<vk::Fence>,
+    // ...
 }
 ```
 
-The `createSyncObjects` function should be changed to create all of the objects:
+다음으로 여러 개의 커맨드 버퍼를 생성해야 합니다. `create_command_buffers` 함수를 수정합니다. `ash`의 `allocate_command_buffers` 함수는 `Vec<vk::CommandBuffer>`를 반환하므로, 반환된 벡터를 바로 필드에 할당하면 됩니다.
 
-```c++
-void createSyncObjects() {
-    imageAvailableSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
-    renderFinishedSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
-    inFlightFences.resize(MAX_FRAMES_IN_FLIGHT);
+```rust
+fn create_command_buffers(&mut self) {
+    let command_buffer_allocate_info = vk::CommandBufferAllocateInfo::builder()
+        .command_pool(self.command_pool)
+        .level(vk::CommandBufferLevel::PRIMARY)
+        .command_buffer_count(MAX_FRAMES_IN_FLIGHT as u32);
 
-    VkSemaphoreCreateInfo semaphoreInfo{};
-    semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    self.command_buffers = unsafe {
+        self.device
+            .allocate_command_buffers(&command_buffer_allocate_info)
+            .expect("Failed to allocate Command Buffers!")
+    };
+}
+```
 
-    VkFenceCreateInfo fenceInfo{};
-    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+`create_sync_objects` 함수는 모든 동기화 객체들을 생성하도록 변경해야 합니다. Ash의 빌더 패턴을 사용하여 생성 정보를 만들고, 루프 내에서 객체들을 생성합니다.
 
-    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphores[i]) != VK_SUCCESS ||
-            vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphores[i]) != VK_SUCCESS ||
-            vkCreateFence(device, &fenceInfo, nullptr, &inFlightFences[i]) != VK_SUCCESS) {
+```rust
+fn create_sync_objects(&mut self) {
+    self.image_available_semaphores = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+    self.render_finished_semaphores = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+    self.in_flight_fences = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
 
-            throw std::runtime_error("failed to create synchronization objects for a frame!");
+    let semaphore_info = vk::SemaphoreCreateInfo::builder();
+    let fence_info = vk::FenceCreateInfo::builder()
+        .flags(vk::FenceCreateFlags::SIGNALED);
+
+    for _ in 0..MAX_FRAMES_IN_FLIGHT {
+        unsafe {
+            let image_available_semaphore = self
+                .device
+                .create_semaphore(&semaphore_info, None)
+                .expect("Failed to create Semaphore Object!");
+            let render_finished_semaphore = self
+                .device
+                .create_semaphore(&semaphore_info, None)
+                .expect("Failed to create Semaphore Object!");
+            let in_flight_fence = self
+                .device
+                .create_fence(&fence_info, None)
+                .expect("Failed to create Fence Object!");
+
+            self.image_available_semaphores.push(image_available_semaphore);
+            self.render_finished_semaphores.push(render_finished_semaphore);
+            self.in_flight_fences.push(in_flight_fence);
         }
     }
 }
 ```
 
-Similarly, they should also all be cleaned up:
+마찬가지로, 이 객체들도 `cleanup`에서 모두 정리되어야 합니다. Rust의 `unsafe` 블록 안에서 파괴 함수를 호출합니다.
 
-```c++
-void cleanup() {
-    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        vkDestroySemaphore(device, renderFinishedSemaphores[i], nullptr);
-        vkDestroySemaphore(device, imageAvailableSemaphores[i], nullptr);
-        vkDestroyFence(device, inFlightFences[i], nullptr);
+```rust
+unsafe fn cleanup(&mut self) {
+    for i in 0..MAX_FRAMES_IN_FLIGHT {
+        self.device.destroy_semaphore(self.render_finished_semaphores[i], None);
+        self.device.destroy_semaphore(self.image_available_semaphores[i], None);
+        self.device.destroy_fence(self.in_flight_fences[i], None);
+    }
+    // ...
+}
+```
+
+커맨드 버퍼는 커맨드 풀이 해제될 때 자동으로 해제되므로, 커맨드 버퍼 정리를 위해 추가로 할 일은 없습니다.
+
+매 프레임마다 올바른 객체를 사용하기 위해, 현재 프레임을 추적해야 합니다. 이를 위해 `App` 구조체에 프레임 인덱스를 추가합니다.
+
+```rust
+struct App {
+    // ...
+    current_frame: usize,
+    // ...
+}
+// App::new()에서 초기화...
+current_frame: 0,
+```
+
+이제 `draw_frame` 함수를 올바른 객체들을 사용하도록 수정할 수 있습니다. `self.current_frame`을 사용하여 각 프레임에 맞는 동기화 객체와 커맨드 버퍼에 접근합니다.
+
+```rust
+fn draw_frame(&mut self) {
+    let in_flight_fence = self.in_flight_fences[self.current_frame];
+
+    unsafe {
+        self.device
+            .wait_for_fences(&[in_flight_fence], true, u64::MAX)
+            .expect("Failed to wait for Fence!");
+
+        self.device
+            .reset_fences(&[in_flight_fence])
+            .expect("Failed to reset Fence!");
     }
 
-    ...
+    let (image_index, _is_suboptimal) = unsafe {
+        self.swapchain_loader
+            .acquire_next_image(
+                self.swapchain,
+                u64::MAX,
+                self.image_available_semaphores[self.current_frame],
+                vk::Fence::null(),
+            )
+            .expect("Failed to acquire next image.")
+    };
+    
+    let command_buffer = self.command_buffers[self.current_frame];
+    unsafe {
+        self.device
+            .reset_command_buffer(command_buffer, vk::CommandBufferResetFlags::empty())
+            .expect("Failed to reset Command Buffer!");
+    }
+
+    self.record_command_buffer(command_buffer, image_index);
+    
+    let wait_semaphores = [self.image_available_semaphores[self.current_frame]];
+    let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+    let signal_semaphores = [self.render_finished_semaphores[self.current_frame]];
+    
+    let submit_infos = [vk::SubmitInfo::builder()
+        .wait_semaphores(&wait_semaphores)
+        .wait_dst_stage_mask(&wait_stages)
+        .command_buffers(&[command_buffer])
+        .signal_semaphores(&signal_semaphores)
+        .build()];
+
+    unsafe {
+        self.device
+            .queue_submit(self.graphics_queue, &submit_infos, in_flight_fence)
+            .expect("Failed to submit draw command buffer!");
+    }
+    
+    // ... Present KHR 로직 ...
 }
 ```
 
-Remember, because command buffers are freed for us when we free the command
-pool, there is nothing extra to do for command buffer cleanup.
+물론, 매번 다음 프레임으로 넘어가는 것을 잊지 말아야 합니다. `draw_frame` 함수의 마지막 부분에 추가합니다.
 
-To use the right objects every frame, we need to keep track of the current
-frame. We will use a frame index for that purpose:
-
-```c++
-uint32_t currentFrame = 0;
-```
-
-The `drawFrame` function can now be modified to use the right objects:
-
-```c++
-void drawFrame() {
-    vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
-    vkResetFences(device, 1, &inFlightFences[currentFrame]);
-
-    vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
-
-    ...
-
-    vkResetCommandBuffer(commandBuffers[currentFrame],  0);
-    recordCommandBuffer(commandBuffers[currentFrame], imageIndex);
-
-    ...
-
-    submitInfo.pCommandBuffers = &commandBuffers[currentFrame];
-
-    ...
-
-    VkSemaphore waitSemaphores[] = {imageAvailableSemaphores[currentFrame]};
-
-    ...
-
-    VkSemaphore signalSemaphores[] = {renderFinishedSemaphores[currentFrame]};
-
-    ...
-
-    if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrame]) != VK_SUCCESS) {
+```rust
+fn draw_frame(&mut self) {
+    // ...
+    
+    self.current_frame = (self.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
 }
 ```
 
-Of course, we shouldn't forget to advance to the next frame every time:
+나머지(%) 연산자를 사용함으로써, 프레임 인덱스는 `MAX_FRAMES_IN_FLIGHT` 만큼의 프레임이 큐에 쌓인 후 다시 순환하게 됩니다.
 
-```c++
-void drawFrame() {
-    ...
+이제 우리는 최대 `MAX_FRAMES_IN_FLIGHT`개의 프레임만 작업 큐에 쌓이도록 하고, 이 프레임들이 서로를 침범하지 않도록 하는 데 필요한 모든 동기화를 구현했습니다. 최종 정리(cleanup)와 같은 코드의 다른 부분에서는 `device.device_wait_idle()`처럼 더 단순한 동기화에 의존해도 괜찮다는 점에 유의하세요. 성능 요구사항에 따라 어떤 접근 방식을 사용할지 결정해야 합니다.
 
-    currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
-}
-```
+동기화에 대해 예제를 통해 더 배우고 싶다면, Khronos의 [이 광범위한 개요](https://github.com/KhronosGroup/Vulkan-Docs/wiki/Synchronization-Examples#swapchain-image-acquire-and-present)를 살펴보세요.
 
-By using the modulo (%) operator, we ensure that the frame index loops around
-after every `MAX_FRAMES_IN_FLIGHT` enqueued frames.
-
-<!-- Possibly use swapchain-image-count for renderFinished semaphores, as it can't
-be known with a fence whether the semaphore is ready for re-use. -->
-
-We've now implemented all the needed synchronization to ensure that there are
-no more than `MAX_FRAMES_IN_FLIGHT` frames of work enqueued and that these
-frames are not stepping over eachother. Note that it is fine for other parts of
-the code, like the final cleanup, to rely on more rough synchronization like
-`vkDeviceWaitIdle`. You should decide on which approach to use based on
-performance requirements.
-
-To learn more about synchronization through examples, have a look at [this extensive overview](https://github.com/KhronosGroup/Vulkan-Docs/wiki/Synchronization-Examples#swapchain-image-acquire-and-present) by Khronos.
-
-
-In the next chapter we'll deal with one more small thing that is required for a
-well-behaved Vulkan program.
-
-
-[C++ code](/code/16_frames_in_flight.cpp) /
-[Vertex shader](/code/09_shader_base.vert) /
-[Fragment shader](/code/09_shader_base.frag)
+다음 챕터에서는 잘 동작하는 Vulkan 프로그램을 위해 필요한 또 다른 작은 사항을 다룰 것입니다.
